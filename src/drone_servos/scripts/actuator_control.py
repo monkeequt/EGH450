@@ -3,7 +3,7 @@ import rospy
 import RPi.GPIO as GPIO
 from std_msgs.msg import Bool
 import time
-
+#test
 sub_1 = None
 sub_2 = None
 chan_list = [12, 13]
