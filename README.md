@@ -6,6 +6,9 @@ This repository contains the software developed for the QUT EGB349/EGH450 **Bush
 
 The system autonomously searches an indoor area, detects and localises fire, smoke and ArUco targets, and displays and vocalises mission information to an operator. It drops a fire-extinguishing payload mid-air over each threat, then lands on a designated ArUco marker.
 
+The image dataset used for training can be found here:
+
+https://universe.roboflow.com/egh455-vbb5h/sar-mission-ucsok
 ---
 
 ## System Overview
