@@ -29,7 +29,7 @@ import netifaces
 # To set up a webhook:
 # 1. Go to your Discord server settings.
 # 2. Create a webhook in the desired channel and copy the webhook URL. then replace it here
-WEBHOOK_URL = "https://discord.com/api/webhooks/1498553824242307212/FmIBVWnIoHpkQzEV_f-c7Yr9klbl2tDUmEihDOnKd2IxvRamb53FgmsvNCEH7k4t4O-l"
+## WEBHOOK_URL = ""
 
 def get_ip_address(interface):
     """
