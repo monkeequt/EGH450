@@ -1,0 +1,1 @@
+/usr/bin/c++ -fPIC -shared -pthread -Wl,-soname,libarea_viz.so -o /home/uavteam6/catkin_ws_G6/devel/lib/libarea_viz.so CMakeFiles/area_viz.dir/src/area_viz/area_viz.cpp.o

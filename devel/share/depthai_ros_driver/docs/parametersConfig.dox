@@ -1,0 +1,71 @@
+\subsubsection parameters ROS parameters
+
+Reads and maintains the following parameters on the ROS server
+
+- \b "~camera_i_enable_ir" : \b [bool] Enabling IR min: False, default: True, max: True
+- \b "~camera_i_floodlight_brightness" : \b [double] Floodlight brightness min: 0.0, default: 0.0, max: 1500.0
+- \b "~camera_i_laser_dot_brightness" : \b [double] Laser dot brightness min: 0.0, default: 800.0, max: 1200.0
+- \b "~left_r_keep_preview_aspect_ratio" : \b [bool] Keep preview aspect ratio min: False, default: True, max: True
+- \b "~left_r_exposure" : \b [int] Sensor exposure min: 1, default: 1000, max: 33000
+- \b "~left_r_focus" : \b [int] Focus min: 0, default: 1, max: 255
+- \b "~left_r_iso" : \b [int] Sensor iso min: 100, default: 800, max: 1600
+- \b "~left_r_set_man_exposure" : \b [bool] Enable manual exposure min: False, default: False, max: True
+- \b "~left_r_set_man_focus" : \b [bool] Enable manual focus min: False, default: False, max: True
+- \b "~left_r_set_man_whitebalance" : \b [bool] Enable manual whitebalance min: False, default: False, max: True
+- \b "~left_r_whitebalance" : \b [int] Whitebalance min: 1000, default: 3300, max: 12000
+- \b "~left_r_set_auto_exposure_limit" : \b [bool] Enable auto exposure limit min: False, default: False, max: True
+- \b "~left_r_auto_exposure_limit" : \b [int] Auto exposure limit min: 1, default: 1000, max: 33000
+- \b "~left_r_set_sharpness" : \b [bool] Enable sharpness min: False, default: False, max: True
+- \b "~left_r_sharpness" : \b [int] Sharpness min: 0, default: 0, max: 4
+- \b "~left_r_set_chroma_denoise" : \b [bool] Enable chroma denoise min: False, default: False, max: True
+- \b "~left_r_chroma_denoise" : \b [int] Chroma denoise min: 0, default: 0, max: 4
+- \b "~left_r_set_luma_denoise" : \b [bool] Enable luma denoise min: False, default: False, max: True
+- \b "~left_r_luma_denoise" : \b [int] Luma denoise min: 0, default: 0, max: 4
+- \b "~left_r_set_auto_exp_region" : \b [bool] Enable auto exposure region min: False, default: False, max: True
+- \b "~left_r_auto_exp_region_start_x" : \b [int] Auto exposure region start x min: 0, default: 0, max: 2147483647
+- \b "~left_r_auto_exp_region_start_y" : \b [int] Auto exposure region start y min: 0, default: 0, max: 2147483647
+- \b "~left_r_auto_exp_region_width" : \b [int] Auto exposure region width min: 0, default: 0, max: 2147483647
+- \b "~left_r_auto_exp_region_height" : \b [int] Auto exposure region height min: 0, default: 0, max: 2147483647
+- \b "~right_r_keep_preview_aspect_ratio" : \b [bool] Keep preview aspect ratio min: False, default: True, max: True
+- \b "~right_r_exposure" : \b [int] Sensor exposure min: 1, default: 1000, max: 33000
+- \b "~right_r_focus" : \b [int] Focus min: 0, default: 1, max: 255
+- \b "~right_r_iso" : \b [int] Sensor iso min: 100, default: 800, max: 1600
+- \b "~right_r_set_man_exposure" : \b [bool] Enable manual exposure min: False, default: False, max: True
+- \b "~right_r_set_man_focus" : \b [bool] Enable manual focus min: False, default: False, max: True
+- \b "~right_r_set_man_whitebalance" : \b [bool] Enable manual whitebalance min: False, default: False, max: True
+- \b "~right_r_whitebalance" : \b [int] Whitebalance min: 1000, default: 3300, max: 12000
+- \b "~right_r_set_auto_exposure_limit" : \b [bool] Enable auto exposure limit min: False, default: False, max: True
+- \b "~right_r_auto_exposure_limit" : \b [int] Auto exposure limit min: 1, default: 1000, max: 33000
+- \b "~right_r_set_sharpness" : \b [bool] Enable sharpness min: False, default: False, max: True
+- \b "~right_r_sharpness" : \b [int] Sharpness min: 0, default: 0, max: 4
+- \b "~right_r_set_chroma_denoise" : \b [bool] Enable chroma denoise min: False, default: False, max: True
+- \b "~right_r_chroma_denoise" : \b [int] Chroma denoise min: 0, default: 0, max: 4
+- \b "~right_r_set_luma_denoise" : \b [bool] Enable luma denoise min: False, default: False, max: True
+- \b "~right_r_luma_denoise" : \b [int] Luma denoise min: 0, default: 0, max: 4
+- \b "~right_r_set_auto_exp_region" : \b [bool] Enable auto exposure region min: False, default: False, max: True
+- \b "~right_r_auto_exp_region_start_x" : \b [int] Auto exposure region start x min: 0, default: 0, max: 2147483647
+- \b "~right_r_auto_exp_region_start_y" : \b [int] Auto exposure region start y min: 0, default: 0, max: 2147483647
+- \b "~right_r_auto_exp_region_width" : \b [int] Auto exposure region width min: 0, default: 0, max: 2147483647
+- \b "~right_r_auto_exp_region_height" : \b [int] Auto exposure region height min: 0, default: 0, max: 2147483647
+- \b "~rgb_r_keep_preview_aspect_ratio" : \b [bool] Keep preview aspect ratio min: False, default: True, max: True
+- \b "~rgb_r_exposure" : \b [int] Sensor exposure min: 1, default: 1000, max: 33000
+- \b "~rgb_r_focus" : \b [int] Focus min: 0, default: 1, max: 255
+- \b "~rgb_r_iso" : \b [int] Sensor iso min: 100, default: 800, max: 1600
+- \b "~rgb_r_set_man_exposure" : \b [bool] Enable manual exposure min: False, default: False, max: True
+- \b "~rgb_r_set_man_focus" : \b [bool] Enable manual focus min: False, default: False, max: True
+- \b "~rgb_r_set_man_whitebalance" : \b [bool] Enable manual whitebalance min: False, default: False, max: True
+- \b "~rgb_r_whitebalance" : \b [int] Whitebalance min: 1000, default: 3300, max: 12000
+- \b "~rgb_r_set_auto_exposure_limit" : \b [bool] Enable auto exposure limit min: False, default: False, max: True
+- \b "~rgb_r_auto_exposure_limit" : \b [int] Auto exposure limit min: 1, default: 1000, max: 33000
+- \b "~rgb_r_set_sharpness" : \b [bool] Enable sharpness min: False, default: False, max: True
+- \b "~rgb_r_sharpness" : \b [int] Sharpness min: 0, default: 0, max: 4
+- \b "~rgb_r_set_chroma_denoise" : \b [bool] Enable chroma denoise min: False, default: False, max: True
+- \b "~rgb_r_chroma_denoise" : \b [int] Chroma denoise min: 0, default: 0, max: 4
+- \b "~rgb_r_set_luma_denoise" : \b [bool] Enable luma denoise min: False, default: False, max: True
+- \b "~rgb_r_luma_denoise" : \b [int] Luma denoise min: 0, default: 0, max: 4
+- \b "~rgb_r_set_auto_exp_region" : \b [bool] Enable auto exposure region min: False, default: False, max: True
+- \b "~rgb_r_auto_exp_region_start_x" : \b [int] Auto exposure region start x min: 0, default: 0, max: 2147483647
+- \b "~rgb_r_auto_exp_region_start_y" : \b [int] Auto exposure region start y min: 0, default: 0, max: 2147483647
+- \b "~rgb_r_auto_exp_region_width" : \b [int] Auto exposure region width min: 0, default: 0, max: 2147483647
+- \b "~rgb_r_auto_exp_region_height" : \b [int] Auto exposure region height min: 0, default: 0, max: 2147483647
+

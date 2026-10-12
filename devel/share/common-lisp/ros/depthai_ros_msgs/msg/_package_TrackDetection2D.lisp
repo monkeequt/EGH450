@@ -1,0 +1,14 @@
+(cl:in-package depthai_ros_msgs-msg)
+(cl:export '(RESULTS-VAL
+          RESULTS
+          BBOX-VAL
+          BBOX
+          IS_TRACKING-VAL
+          IS_TRACKING
+          TRACKING_ID-VAL
+          TRACKING_ID
+          TRACKING_AGE-VAL
+          TRACKING_AGE
+          TRACKING_STATUS-VAL
+          TRACKING_STATUS
+))

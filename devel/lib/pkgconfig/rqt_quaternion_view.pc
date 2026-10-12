@@ -1,0 +1,8 @@
+prefix=/home/uavteam6/catkin_ws_G6/devel
+
+Name: rqt_quaternion_view
+Description: Description of rqt_quaternion_view
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

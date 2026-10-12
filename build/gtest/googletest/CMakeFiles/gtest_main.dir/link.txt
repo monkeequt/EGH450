@@ -1,0 +1,1 @@
+/usr/bin/c++ -fPIC -shared -pthread -Wl,-soname,libgtest_main.so -o ../lib/libgtest_main.so CMakeFiles/gtest_main.dir/src/gtest_main.cc.o  -Wl,-rpath,/home/uavteam6/catkin_ws_G6/build/gtest/lib ../lib/libgtest.so -lpthread

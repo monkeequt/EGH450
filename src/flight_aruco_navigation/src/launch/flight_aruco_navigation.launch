@@ -1,0 +1,43 @@
+<launch>
+
+    <!-- Static transform: UAV -> Camera -->
+    <node
+        pkg="flight_aruco_navigation"
+        type="camera_to_uav.py"
+        name="camera_to_uav"
+        output="screen"
+    />
+
+    <!-- Dynamic transform: OptiTrack World -> UAV -->
+    <node
+        pkg="flight_aruco_navigation"
+        type="map_to_tf.py"
+        name="map_to_tf"
+        output="screen"
+    />
+
+    <!-- Transform ArUco pose into OptiTrack world frame -->
+    <node
+        pkg="flight_aruco_navigation"
+        type="flight_aruco_navigation.py"
+        name="flight_aruco_navigation"
+        output="screen">
+
+        <param name="update_existing" value="false" />
+        <param name="marker_scale" value="0.15" />
+</node>
+
+<!-- Creating a separate node for Image navigation from camera to world map -->
+
+    <!-- Transform ArUco pose into OptiTrack world frame -->
+    <node
+        pkg="flight_aruco_navigation"
+        type="flight_target_navigation.py"
+        name="flight_target_navigation"
+        output="screen">
+
+        <param name="update_existing" value="false" />
+        <param name="marker_scale" value="0.15" />
+</node>
+
+</launch>

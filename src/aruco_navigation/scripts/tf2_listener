@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+
+import rospy
+import tf2_ros
+
+from visualization_msgs.msg import Marker
+
+
+tfBuffer = None
+tfln = None
+pub_aruco_map = None
+
+global_frame = "map"
+
+def callback_aruco(msg_in):
+
+	# Broadcaster creates frames named aruco_<ID>
+	target_frame = "aruco_%d" % msg_in.id
+
+	try:
+
+		# Find this specific marker in the global map frame
+		t = tfBuffer.lookup_transform(
+			global_frame,
+			target_frame,
+			rospy.Time(0),
+			rospy.Duration(0.5)
+		)
+
+		x = float(t.transform.translation.x)
+		y = float(t.transform.translation.y)
+		z = float(t.transform.translation.z)
+
+		# Keep publishing Marker rather than PoseStamped because landing
+		# requires the ArUco ID
+		marker = Marker()
+
+		marker.header.stamp = rospy.Time.now()
+		marker.header.frame_id = global_frame
+		
+		marker.id = msg_in.id
+
+		marker.pose.position.x = x
+		marker.pose.position.y = y
+		marker.pose.position.z = z
+
+		marker.pose.orientation.x = 0.0
+		marker.pose.orientation.y = 0.0
+		marker.pose.orientation.z = 0.0
+		marker.pose.orientation.w = 1.0
+		
+		if rospy.is_shutdown():
+			return
+
+		pub_aruco_map.publish(marker)
+
+	except (
+		tf2_ros.LookupException,
+		tf2_ros.ConnectivityException,
+		tf2_ros.ExtrapolationException
+	) as e:
+
+		rospy.logwarn_throttle(
+			2.0,
+			"Could not transform ArUco ID %d into map frame: %s",
+			msg_in.id,
+			global_frame,
+			str(e)
+		)
+
+
+if __name__ == '__main__':
+
+	rospy.init_node('tf2_listener')
+	
+	global_frame = rospy.get_param("~global_frame", "map")
+	
+	# TF listener
+	tfBuffer = tf2_ros.Buffer()
+	tfln = tf2_ros.TransformListener(tfBuffer)
+
+	# Publish ArUco ID + map-relative position
+	pub_aruco_map = rospy.Publisher(
+		'/aruco_detection/map_pose',
+		Marker,
+		queue_size=10
+	)
+	
+	# Listen for camera-relative ArUco detections
+	sub_aruco = rospy.Subscriber(
+		'/aruco_detection/pose',
+		Marker,
+		callback_aruco,
+		queue_size=10
+	)
+
+	rospy.loginfo("tf2_listener running.")
+
+	try:
+		rospy.spin()
+
+	finally:
+		sub_aruco.unregister()
+		rospy.loginfo("tf2_listener shutting down")

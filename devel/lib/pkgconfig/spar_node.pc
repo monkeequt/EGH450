@@ -1,0 +1,8 @@
+prefix=/home/uavteam6/catkin_ws_G6/devel
+
+Name: spar_node
+Description: Description of spar_node
+Version: 0.0.0
+Cflags: -I/home/uavteam6/catkin_ws_G6/src/spar/spar_node/include
+Libs: -L${prefix}/lib 
+Requires: 

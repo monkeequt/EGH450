@@ -1,0 +1,2 @@
+set(depthai_ros_msgs_MESSAGE_FILES "msg/AutoFocusCtrl.msg;msg/FFMPEGPacket.msg;msg/HandLandmark.msg;msg/HandLandmarkArray.msg;msg/SpatialDetection.msg;msg/SpatialDetectionArray.msg;msg/ImuWithMagneticField.msg;msg/TrackDetection2D.msg;msg/TrackDetection2DArray.msg;msg/TrackedFeature.msg;msg/TrackedFeatures.msg")
+set(depthai_ros_msgs_SERVICE_FILES "srv/TriggerNamed.srv;srv/NormalizedImageCrop.srv")

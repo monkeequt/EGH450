@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+
+import rospy
+import tf2_ros
+import tf_conversions
+
+from geometry_msgs.msg import TransformStamped
+from visualization_msgs.msg import Marker
+
+# =============================================================================
+# Global Variables
+# =============================================================================
+
+tfbr = None
+
+tfBuffer = None
+tfln = None
+
+pub_aruco = None
+
+camera_name = "camera"
+# True when running with the UAVASR emulator false during physical flight.
+emulator_mode = False
+
+# aruco_target = "aruco_16" ## Added, remove if unnecessary
+
+# Fixed emulator marker location in MAP frame (only Emulator)
+fake_aruco_id = 16
+
+fake_map_x = -1.0
+fake_map_y = -1.0
+fake_map_z = 0.0
+
+# =============================================================================
+# Broadcaster Camera to ArUco Broadcaster
+# =============================================================================
+
+def broadcast_aruco(msg_in):
+
+	# Use the detection timestamp if available.
+	if msg_in.header.stamp != rospy.Time(0):
+		time_found = msg_in.header.stamp
+	else:
+		time_found = rospy.Time.now()
+
+	# Create Camera to ArUco Transform.
+	t = TransformStamped()
+
+	t.header.stamp = time_found
+	t.header.frame_id = camera_name
+	t.child_frame_id = "aruco_%d" % msg_in.id
+
+	# Position of Marker Relative to Camera.
+	
+	# EMULATOR: calculated from the fixed map marker
+	# PHYSICAL: supplied by SolvePNP
+	
+	t.transform.translation.x = msg_in.pose.position.x
+	t.transform.translation.y = msg_in.pose.position.y
+	t.transform.translation.z = msg_in.pose.position.z
+
+	# Marker orientation is not required for landing.
+	t.transform.rotation.x = 0.0
+	t.transform.rotation.y = 0.0
+	t.transform.rotation.z = 0.0
+	t.transform.rotation.w = 1.0
+
+	# Broadcast Camera to Aruco_<ID> Transform
+	tfbr.sendTransform(t)
+
+	#rospy.loginfo(
+		#"ArUco ID %d: camera XYZ = [%.2f, %.2f, %.2f]",
+		#msg_in.id,
+		#msg_in.pose.position.x,
+		#msg_in.pose.position.y,
+		#msg_in.pose.position.z
+	#)
+
+# =============================================================================
+# Common Detection Callback
+# =============================================================================
+
+def callback_aruco(msg_in):
+
+	# Same callback for emulator fake detections and physical solvePnP 
+	# detections
+	broadcast_aruco(msg_in)
+
+# =============================================================================
+# Emulator Fixed Map Point
+# =============================================================================
+
+def get_fake_aruco_camera_position():
+	
+	# lookup_transform(target, soruce, ...)
+	# This is the transformation: map to camera
+	t = tfBuffer.lookup_transform(
+		camera_name, 
+		"map", 
+		rospy.Time(0), 
+		rospy.Duration(0.2)
+	)
+	
+	# Rotation Quaternion for Map to Camera\
+	q = [
+			t.transform.rotation.x,
+			t.transform.rotation.y,
+			t.transform.rotation.z,
+			t.transform.rotation.w
+		]
+	
+	rotation_matrix = (tf_conversions.transformations.quaternion_matrix(q))
+	
+	camera_x = (
+		rotation_matrix[0,0] * fake_map_x +
+		rotation_matrix[0,1] * fake_map_y +
+		rotation_matrix[0,2] * fake_map_z +
+		t.transform.translation.x
+	)
+	
+	camera_y = (
+		rotation_matrix[1,0] * fake_map_x +
+		rotation_matrix[1,1] * fake_map_y +
+		rotation_matrix[1,2] * fake_map_z +
+		t.transform.translation.y
+	)
+	
+	camera_z = (
+		rotation_matrix[2,0] * fake_map_x +
+		rotation_matrix[2,1] * fake_map_y +
+		rotation_matrix[2,2] * fake_map_z +
+		t.transform.translation.z
+	)
+	
+	return (camera_x, camera_y, camera_z, t.header.stamp)
+
+def publish_fake_aruco(event):
+
+	if rospy.is_shutdown():
+		return
+
+	try:
+	
+		(
+			camera_x,
+			camera_y,
+			camera_z,
+			transform_stamp
+		) = get_fake_aruco_camera_position()
+		
+	except (
+		tf2_ros.LookupException,
+		tf2_ros.ConnectivityException,
+		tf2_ros.ExtrapolationException
+	) as e:
+	
+		rospy.logwarn_throttle(
+			2.0, "Cannot generate fake ArUco detection: %s" % str(e)
+		)
+		
+		return
+		
+	# Create the same Marker message as the physical detector
+	msg = Marker()
+	# Use the timestamp of the Map to Camera Transform to calculate this
+	# measurement
+	if transform_stamp != rospy.Time(0):
+		msg.header.stamp = transform_stamp
+	else:
+		msg.header.stamp = rospy.Time.now()
+	
+	msg.header.frame_id = camera_name
+	msg.id = fake_aruco_id
+
+	msg.pose.position.x = camera_x
+	msg.pose.position.y = camera_y
+	msg.pose.position.z = camera_z
+
+	msg.pose.orientation.x = 0.0
+	msg.pose.orientation.y = 0.0
+	msg.pose.orientation.z = 0.0
+	msg.pose.orientation.w = 1.0
+
+	# Do not broadcast Camera to ArUco here. Publish the fake detection through
+	# the same interface as the physcial detector. callback_aruco() will create
+	# the TF exactly as it does during the physical flight.
+	pub_aruco.publish(msg)
+
+# =============================================================================
+# Main
+# =============================================================================
+
+if __name__ == '__main__':
+
+	rospy.init_node('tf2_broadcaster_target')
+	
+	# =========================================================================
+	# Common Params
+	# =========================================================================
+	
+	emulator_mode = rospy.get_param("~emulator_mode", False)
+	camera_name = rospy.get_param("~camera_name", "camera")
+	
+	# =========================================================================
+	# Common TF Broadcaster
+	# =========================================================================
+
+	# TF broadcaster used in both emulator and physical modes.
+	tfbr = tf2_ros.TransformBroadcaster()
+
+  	# =========================================================================
+	# Common ArUco Subscriber (Intentionally Active in both Modes)
+	# =========================================================================
+	
+	sub_aruco = rospy.Subscriber(
+			'/aruco_detection/pose',
+			Marker,
+			callback_aruco,
+			queue_size = 10
+		)
+		
+	# =========================================================================
+	# Emulator-Only Fake Detection Generator
+	# =========================================================================
+
+	if emulator_mode:
+
+		rospy.loginfo(
+			"tf2_broadcaster_target running in EMULATOR mode."
+		)
+		
+		# Fake marker parameters can be changed from launch file.
+		fake_aruco_id = rospy.get_param("~fake_aruco_id", 1)
+		fake_map_x = rospy.get_param("~fake_map_x", -1.0)
+		fake_map_y = rospy.get_param("~fake_map_y", -1.0)
+		fake_map_z = rospy.get_param("~fake_map_z", 0.0)
+
+		tfBuffer = tf2_ros.Buffer()
+		tfln = tf2_ros.TransformListener(tfBuffer)
+		
+		# Publish the same topic normally produced by the real ArUco detector
+		pub_aruco = rospy.Publisher(
+			'/aruco_detection/pose',
+			Marker,
+			queue_size = 10
+		)
+
+		rospy.loginfo(
+			"Fake ArUco ID %d at camera XYZ [%.2f, %.2f, %.2f]",
+			fake_aruco_id,
+			fake_map_x,
+			fake_map_y,
+			fake_map_z
+		)
+
+		# Repeated publication is required because landing.py checks whether
+		# the marker detection is fresh.
+		timer = rospy.Timer(
+			rospy.Duration(0.1),
+			publish_fake_aruco
+		)
+
+	# =========================================================================
+	# Physical
+	# =========================================================================
+
+	else:
+
+		rospy.loginfo("tf2_broadcaster_target running in PHYSICAL mode.")
+		rospy.loginfo("Waiting for physical detections on /aruco_detection/pose")
+		
+	# =========================================================================
+	# Run
+	# =========================================================================
+
+	try:
+		rospy.spin()
+
+	except rospy.exceptions.ROSInterruptException:
+		pass
+
+	finally:
+		if emulator_mode:
+			timer.shutdown()
+		rospy.loginfo("tf2_broadcaster_target shutting down"        )

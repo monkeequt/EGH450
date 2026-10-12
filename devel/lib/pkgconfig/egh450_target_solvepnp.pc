@@ -1,0 +1,8 @@
+prefix=/home/uavteam6/catkin_ws_G6/devel
+
+Name: egh450_target_solvepnp
+Description: Description of egh450_target_solvepnp
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

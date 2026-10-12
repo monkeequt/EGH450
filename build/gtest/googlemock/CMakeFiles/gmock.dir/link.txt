@@ -1,0 +1,1 @@
+/usr/bin/c++ -fPIC -shared -pthread -Wl,-soname,libgmock.so -o ../lib/libgmock.so "CMakeFiles/gmock.dir/src/gmock-all.cc.o"  -Wl,-rpath,/home/uavteam6/catkin_ws_G6/build/gtest/lib ../lib/libgtest.so -lpthread

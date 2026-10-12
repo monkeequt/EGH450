@@ -1,0 +1,8 @@
+prefix=/home/uavteam6/catkin_ws_G6/devel
+
+Name: depthai_descriptions
+Description: Description of depthai_descriptions
+Version: 2.11.2
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

@@ -1,0 +1,66 @@
+<launch>
+
+    <!-- Static transform: UAV -> Camera -->
+    <node
+        pkg="uavasr_aruco_navigation"
+        type="camera_to_uav.py"
+        name="camera_to_uav"
+        output="screen"
+    />
+
+    <!-- Dynamic transform: OptiTrack World -> UAV -->
+    <node
+        pkg="uavasr_aruco_navigation"
+        type="optitrack_to_tf.py"
+        name="optitrack_to_tf"
+        output="screen"
+    />
+
+    <!-- Transform ArUco pose into OptiTrack world frame -->
+    <node
+        pkg="uavasr_aruco_navigation"
+        type="uavasr_aruco_navigation.py"
+        name="uavasr_aruco_navigation"
+        output="screen">
+
+        <param name="update_existing" value="false" />
+        <param name="marker_scale" value="0.15" />
+    </node>
+
+<!--This is the section for the target detection-->
+    <!-- Static transform: UAV -> Camera -->
+    <node
+        pkg="uavasr_aruco_navigation"
+        type="camera_to_uav.py"
+        name="camera_to_uav_target"
+        output="screen"
+    />
+
+    <!-- Dynamic transform: OptiTrack World -> UAV -->
+    <node
+        pkg="uavasr_aruco_navigation"
+        type="optitrack_to_tf.py"
+        name="optitrack_to_tf_target"
+        output="screen"
+    />
+
+    <!-- Transform ArUco pose into OptiTrack world frame -->
+    <node
+        pkg="uavasr_aruco_navigation"
+        type="uavasr_target_navigation.py"
+        name="uavasr_target_navigation"
+        output="screen">
+
+        <param name="update_existing" value="false" />
+        <param name="marker_scale" value="0.15" />
+    </node>
+
+<!-- Connect the RViz map frame to the OptiTrack coordinate system -->
+<node
+    pkg="tf2_ros"
+    type="static_transform_publisher"
+    name="map_to_optitrack_world"
+    args="0 0 0 0 0 0 1 map optitrack_world"
+/>
+
+</launch>

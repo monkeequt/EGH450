@@ -1,0 +1,8 @@
+prefix=/home/uavteam6/catkin_ws_G6/devel
+
+Name: depthai_ros_msgs
+Description: Description of depthai_ros_msgs
+Version: 2.11.2
+Cflags: -I/home/uavteam6/catkin_ws_G6/devel/include
+Libs: -L${prefix}/lib 
+Requires: geometry_msgs message_runtime sensor_msgs std_msgs vision_msgs

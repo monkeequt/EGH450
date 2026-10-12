@@ -1,0 +1,33 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/uavteam6/catkin_ws_G6/build/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/gtest/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/gtest/googlemock/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/gtest/googletest/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/depthai-ros/depthai-ros/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/egh450_image_processor/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/egh450_target_solvepnp/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/rqt_eyedropper/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/rqt_generic_hud/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/rqt_mavros_gui/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/rqt_quaternion_view/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/breadcrumb/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/depthai_publisher/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/flight_aruco_navigation/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/qutas_lab_450/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/servo_control/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/spar/spar_msgs/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/spar/spar_node/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/aruco_navigation/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/uavasr_aruco_navigation/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/uavasr_emulator/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/depthai-ros/depthai_ros_msgs/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/depthai-ros/depthai_bridge/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/depthai-ros/depthai_filters/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/depthai-ros/depthai_descriptions/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/depthai-ros/depthai_examples/cmake_install.cmake",
+		"/home/uavteam6/catkin_ws_G6/build/depthai-ros/depthai_ros_driver/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

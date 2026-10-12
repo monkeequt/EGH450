@@ -1,0 +1,13 @@
+<launch>
+    <!-- Transform ArUco pose into OptiTrack world frame -->
+    <node
+        pkg="uavasr_aruco_navigation"
+        type="uavasr_target_navigation.py"
+        name="uavasr_target_navigation"
+        output="screen">
+
+        <param name="update_existing" value="false" />
+        <param name="marker_scale" value="0.15" />
+    </node>
+
+</launch>
