@@ -986,26 +986,3 @@ src/depthai_publisher/src/depthai_publisher/yolov5_runner_distance_est_v3.py
 
 Check these settings before each assessed flight.
 
----
-
-## Team
-
-| Member | Subsystem |
-|---|---|
-| Liam Almirante | Project Manager |
-| Lachlan Gough | Operator Interface |
-| Yaroslav Sanduliak | Image Processing |
-| Joshua Puddle | Image Processing |
-| Darcy Hennings | Autopilot & Navigation |
-| Liam MacCormick | Autopilot & Navigation |
-| Ryder Doran | Payload Design |
-| Ziggy Kowalski | Airframe, Power & Propulsion |
-| Joshua Mitchell | Airframe, Power & Propulsion |
-
----
-
-## Acknowledgements
-
-- **QUT Airborne Systems Lab:** Prof. Felipe Gonzalez, Dr. Julian Galvez, Dr. Sebastien Boiteau, Anuraj Uthayasooriyan and Dipraj Debnath
-- QUTAS, for the SPAR, Breadcrumb, qutas_lab_450, UAVASR emulator and RQT packages
-- Luxonis, for DepthAI and `depthai-ros`
