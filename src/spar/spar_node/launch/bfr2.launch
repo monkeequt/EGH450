@@ -1,0 +1,133 @@
+<?xml version='1.0'?>
+
+<launch>
+
+    <!-- =========================================================================== -->
+    <!-- ======================== Common Mode Configuration ======================== -->
+    <!-- =========================================================================== -->
+
+    <!-- Camera TF frame used by YOLO object detections -->
+    <arg name="camera_name" default="camera" />
+
+    <!-- Global TF frame used by guidance.
+         Emulator: map
+         Physical: optitrack_world -->
+    <arg name="global_frame" default="map" />
+
+    <!-- Designated final landing ArUco marker -->
+    <arg name="landing_aruco_id" default="11" />    
+
+    <!-- Mission flight height -->
+    <arg name="survey_alt" default="2.0" />
+
+    <!-- Obstacle 0 -->
+    <arg name="obstacle0_x" default="0.0" />
+    <arg name="obstacle0_y" default="0.0" />
+    <!-- Obstacle 1 -->
+    <arg name="obstacle1_x" default="0.0" />
+    <arg name="obstacle1_y" default="0.0" />
+
+    <!-- Battery failsafe shared by guidance and emulator battery simulation. -->
+    <arg name="battery_threshold" default="0.20" />
+
+    <!-- Exact airborne time for the emulator battery to reach battery_threshold.
+          600 s = 10 minutes. Set to 0.0 to disable artificial emulator discharge. -->
+    <arg name="emulator_time_to_threshold_seconds" default="600.0" />
+
+    <!-- =========================================================================== -->
+    <!-- ============================= Battery Manager ============================== -->
+    <!-- =========================================================================== -->
+
+    <!-- One battery interface for both environments.
+
+         Physical:
+             /mavros/battery -> /uav/battery
+
+         Emulator:
+             /uavasr/battery -> simulated discharge -> /uav/battery
+
+         Recent MAVROS telemetry always takes priority, so no mode switch is
+         required when moving between emulator and physical flight. -->
+    <node name="battery_manager" pkg="spar_node" type="battery_manager.py" respawn="false" output="screen">
+        <param name="output_topic" type="string" value="/uav/battery" />
+        <param name="mavros_topic" type="string" value="/mavros/battery" />
+        <param name="emulator_topic" type="string" value="/uavasr/battery" />
+        <param name="emulator_pose_topic" type="string" value="/uavasr/pose" />
+        <param name="physical_timeout" type="double" value="2.0" />
+        <param name="battery_threshold" type="double" value="$(arg battery_threshold)" />
+        <param name="emulator_time_to_threshold_seconds" type="double" value="$(arg emulator_time_to_threshold_seconds)" />
+        <param name="emulator_airborne_altitude" type="double" value="0.20" />
+    </node>
+
+
+    <!-- =========================================================================== -->
+    <!-- ================================ Guidance ================================= -->
+    <!-- =========================================================================== -->
+
+    <node name="guidance" pkg="spar_node" type="bfr2" respawn="false" output="screen">
+
+        <!-- Obstacle coordinates -->
+        <param name="obstacle0_x" type="double" value="$(arg obstacle0_x)" />
+        <param name="obstacle0_y" type="double" value="$(arg obstacle0_y)" />
+        <param name="obstacle1_x" type="double" value="$(arg obstacle1_x)" />
+        <param name="obstacle1_y" type="double" value="$(arg obstacle1_y)" />
+
+        <!-- TF / pose configuration -->
+        <param name="camera_name" type="string" value="$(arg camera_name)" />
+        <param name="global_frame" type="string" value="$(arg global_frame)" />
+        <remap from="~pose" to="/uavasr/pose" />
+
+        <!-- Landing ArUco -->
+        <param name="landing_aruco_id" type="int" value="$(arg landing_aruco_id)" />
+        <param name="aruco_world_topic" type="string" value="/aruco_detection/world_markers" />
+
+        <!-- Battery failsafe. If the landing ArUco has not yet been found,
+             return to [-1,-1] and run the normal landing sequence. -->
+        <param name="battery_threshold" type="double" value="$(arg battery_threshold)" />
+        <param name="fallback_landing_x" type="double" value="-1.0" />
+        <param name="fallback_landing_y" type="double" value="-1.0" />
+
+        <!-- Fire / smoke detections from yolov5_runner_distance_est_v3 -->
+        <param name="object_pose_topic" type="string" value="/depthai_node/detection/pose" />
+        <param name="image_deploy_altitude" type="double" value="0.5" />
+        <param name="image_hover_time" type="double" value="5.0" />
+
+        <!-- Short fly-by-friendly target confirmation. A single isolated
+             detection is rejected, but consecutive camera frames are not required. -->
+        <param name="image_sample_duration" type="double" value="0.40" />
+        <param name="image_min_observations" type="int" value="2" />
+        <param name="image_min_observation_span" type="double" value="0.10" />
+
+        <!-- Persistent RViz visualisation topic. Markers are published only
+             after payload deployment, at the UAV XY where deployment occurred. -->
+        <param name="image_marker_topic" type="string" value="/guidance/image_targets" />
+        <param name="image_marker_scale" type="double" value="0.18" />
+
+        <!-- Survey altitude -->
+        <param name="surveyAlt" type="double" value="$(arg survey_alt)" />
+
+        <!-- Linear and yaw motion velocities -->
+        <param name="vel_linear" type="double" value="0.5" />
+        <param name="vel_yaw" type="double" value="0.2" />
+
+        <!-- Takeoff / landing -->
+        <param name="takeoff_speed" type="double" value="0.8" />
+        <param name="land_speed" type="double" value="0.1" />
+        <param name="landing_final_altitude" type="double" value="0.5" />
+        <param name="landing_hover_time" type="double" value="5.0" />
+
+        <!-- Position and yaw waypoint accuracies -->
+        <param name="acc_pos" type="double" value="0.1" />
+        <param name="acc_yaw" type="double" value="0.1" />
+
+        <!-- Safe boundary values for O134 -->
+        <param name="safeRangeX" type="double" value="4.4" />
+        <param name="safeRangeY" type="double" value="3.3" />
+        <param name="safeRangeZ" type="double" value="4.0" />
+
+        <!-- SPAR -->
+        <param name="action_topic" type="string" value="spar/flight" />
+
+    </node>
+
+</launch>

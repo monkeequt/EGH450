@@ -1,0 +1,55 @@
+<?xml version='1.0'?>
+<launch>
+	<!-- Emulator Parameters -->
+	<arg name="uav_name" default="emulated_uav"/>
+	<arg name="topic_grid" default="/grid" />
+	<arg name="frame_id" default="map" />
+
+	<!-- User-supplied obstacle coordinates -->
+	<arg name="obstacle0_x" default="40" />
+	<arg name="obstacle0_y" default="20" />
+	<arg name="obstacle1_x" default="60" />
+	<arg name="obstacle1_y" default="80" />
+
+	<!-- Spar Node -->
+	<remap from="spar/mav_state" to="uavasr/state"/>
+	<remap from="spar/pose" to="uavasr/pose"/>
+	<remap from="spar/setpoint" to="uavasr/setpoint_raw/local"/>
+	<remap from="/mavros/local_position/pose" to="/uavasr/pose"/>
+	<include file="$(find spar_node)/launch/spar.launch"/>
+
+	<!-- Emulator Node -->
+	<node pkg="uavasr_emulator" type="uavasr_emulator_node" name="uavasr" clear_params="true" output="screen">
+		<!-- Operational Parameters -->
+		<param name="frame_id" value="map" type="str"/>
+		<param name="model_id" value="$(arg uav_name)" type="str"/>
+
+		<param name="start_armed" value="true" type="bool"/>
+		<param name="start_mode_offboard" value="true" type="bool"/>
+
+		<param name="update_rate_pose" value="50.0" type="double"/>
+		<param name="update_rate_battery" value="1.0" type="double"/>
+		<param name="update_rate_state" value="1.0" type="double"/>
+	</node>
+
+	<!-- Occupancy Grid -->
+	<node pkg="qutas_lab_450" type="area_map_node" name="area_map" clear_params="true" output="screen">
+		<remap from="~/grid" to="$(arg topic_grid)"/>
+		<param name="frame_id" value="$(arg frame_id)" type="str" />
+
+		<!-- Map Parameters /-->
+		<rosparam command="load" file="$(find qutas_lab_450)/launch/map_layout.yaml" subst_value="true"/>
+	</node>
+
+	<!-- Grid Visualization -->
+	<node pkg="qutas_lab_450" type="area_viz_node" name="area_viz" clear_params="true" output="screen">
+		<param name="topic_grid" value="$(arg topic_grid)" type="str" />
+		<param name="topic_markers" value="markers" type="str" />
+		<param name="marker/namespace" value="area_viz" type="str" />
+		<param name="marker/height" value="3.0" type="double" />
+		<param name="marker/color/alpha" value="1.0" type="double" />
+		<param name="marker/color/red" value="0.5" type="double" />
+		<param name="marker/color/green" value="0.5" type="double" />
+		<param name="marker/color/blue" value="0.5" type="double" />
+	</node>
+</launch>

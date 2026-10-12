@@ -1,0 +1,22 @@
+map:
+  width: 100
+  height: 100
+  resolution: 0.1
+  boarder: true
+
+obstacles:
+  #rand:
+  #  size: 3
+  #  divisor: 6
+  obs_0:
+    type: "square"
+    size: 5
+    position:
+      x: $(arg obstacle0_x)
+      y: $(arg obstacle0_y)
+  obs_1:
+    type: "square"
+    size: 5
+    position:
+      x: $(arg obstacle1_x)
+      y: $(arg obstacle1_y)

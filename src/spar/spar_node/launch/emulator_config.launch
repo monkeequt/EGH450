@@ -1,0 +1,311 @@
+<?xml version="1.0"?>
+
+<launch>
+
+    <!-- ================================================================ -->
+    <!-- GROUP 6 - COMPLETE EMULATOR MISSION                             -->
+    <!-- ================================================================ -->
+    <!--
+        This replaces the separate terminals normally used for:
+          - roscore
+          - Breadcrumb
+          - QUTAS Lab 450 environment (through the emulator/SPAR launch tree)
+          - UAVASR emulator
+          - RQT
+          - SPAR
+          - Group 6 ArUco / waypoint guidance
+
+        roslaunch starts the ROS master automatically if roscore is not
+        already running.
+
+        The guidance node is deliberately delayed OUTSIDE landing.py:
+          1. Wait for the first /uavasr/pose message.
+          2. Wait another 75 seconds for the operator to configure RQT/RViz.
+          3. Start the guidance node.
+
+        The guidance node is marked required="true".  When the mission
+        completes and landing.py exits, this master launch shuts down all
+        nodes started here, including SPAR.  Starting this launch again
+        therefore starts a fresh SPAR instance.
+    -->
+
+
+    <!-- ================================================================ -->
+    <!-- USER SETTINGS                                                   -->
+    <!-- ================================================================ -->
+
+    <arg name="start_rqt" default="true" />
+
+    <!-- Designated ArUco marker used for final landing -->
+    <arg name="landing_aruco_id" default="16" />
+
+    <!-- Trigger autonomous safe-zone return at 10% battery -->
+    <arg name="battery_threshold" default="0.10" />
+
+    <!-- Emulator / TF frame settings -->
+    <arg name="emulator_mode" default="true" />
+    <arg name="uav_name" default="emulated_uav" />
+    <arg name="camera_name" default="camera" />
+
+    <!-- Fake ArUco location in the emulator map -->
+    <arg name="fake_aruco_map_x" default="-1.0" />
+    <arg name="fake_aruco_map_y" default="-1.0" />
+    <arg name="fake_aruco_map_z" default="0.0" />
+
+
+    <!-- ================================================================ -->
+    <!-- BREADCRUMB                                                      -->
+    <!-- ================================================================ -->
+
+    <include file="$(find breadcrumb)/launch/breadcrumb.launch" />
+
+
+    <!-- ================================================================ -->
+    <!-- QUTAS LAB 450 ENVIRONMENT                                       -->
+    <!-- ================================================================ -->
+    <!--
+        Do NOT launch qutas_lab_450/environment.launch separately here.
+
+        In the user's installed emulator/SPAR launch tree the environment
+        components are already being brought in. Including environment.launch
+        again creates duplicate nodes such as /area_map and roslaunch aborts.
+
+        The remaining launch tree therefore owns the single area/map
+        publisher used by Breadcrumb.
+    -->
+
+
+    <!-- ================================================================ -->
+    <!-- UAVASR EMULATOR / SPAR                                          -->
+    <!-- ================================================================ -->
+    <!--
+        Do NOT include uavasr_emulator/launch/emulator.launch separately
+        here. spar_uavasr.launch already starts/configures the UAVASR
+        simulator for SPAR. Including both in one parent launch produces
+        two nodes named /uavasr and roslaunch aborts.
+    -->
+
+
+    <!-- ================================================================ -->
+    <!-- RQT                                                             -->
+    <!-- ================================================================ -->
+
+    <node if="$(arg start_rqt)"
+          name="rqt_gui"
+          pkg="rqt_gui"
+          type="rqt_gui"
+          respawn="false"
+          output="screen" />
+
+
+    <!-- ================================================================ -->
+    <!-- SPAR + UAVASR EMULATOR                                          -->
+    <!-- ================================================================ -->
+
+    <include file="$(find spar_node)/launch/spar_uavasr.launch" />
+
+    <!-- ================================================================ -->
+    <!-- QUIET SPAR INFO LOGGING                                         -->
+    <!-- ================================================================ -->
+    <!--
+        Wait for SPAR's logger service, then raise only the SPAR node's
+        ROS console level from INFO to WARN.
+
+        This suppresses repeated messages such as:
+            [Spar] Selected duration ...
+            [Spar] Selected motion ...
+            [Spar] flight action: Accepted
+            [Spar] flight action: Succeeded
+
+        WARN, ERROR and FATAL messages from SPAR are still shown.
+        Guidance, Breadcrumb, TF2 and emulator INFO messages are unchanged.
+    -->
+    <node name="quiet_spar_logger"
+          pkg="rosservice"
+          type="rosservice"
+          args="call /spar/set_logger_level ros warn"
+          respawn="false"
+          output="log"
+          launch-prefix="bash -c 'until rosservice info /spar/set_logger_level &gt;/dev/null 2&gt;&amp;1; do sleep 0.2; done; exec &quot;$0&quot; &quot;$@&quot;'" />
+
+
+    <!-- ================================================================ -->
+    <!-- UAV BODY -> CAMERA TF                                           -->
+    <!-- ================================================================ -->
+
+    <node name="tf2_broadcaster_frames"
+          pkg="aruco_navigation"
+          type="tf2_broadcaster_frames"
+          respawn="false"
+          output="screen">
+
+        <param name="uav_name"
+               type="string"
+               value="$(arg uav_name)" />
+
+        <param name="camera_name"
+               type="string"
+               value="$(arg camera_name)" />
+
+    </node>
+
+
+    <!-- ================================================================ -->
+    <!-- CAMERA -> ARUCO_<ID> TF / EMULATOR FAKE MARKER                  -->
+    <!-- ================================================================ -->
+
+    <node name="tf2_broadcaster_target"
+          pkg="aruco_navigation"
+          type="tf2_broadcaster_target"
+          respawn="false"
+          output="screen">
+
+        <param name="emulator_mode"
+               type="bool"
+               value="$(arg emulator_mode)" />
+
+        <param name="camera_name"
+               type="string"
+               value="$(arg camera_name)" />
+
+        <param name="fake_aruco_id"
+               type="int"
+               value="$(arg landing_aruco_id)" />
+
+        <param name="fake_map_x"
+               type="double"
+               value="$(arg fake_aruco_map_x)" />
+
+        <param name="fake_map_y"
+               type="double"
+               value="$(arg fake_aruco_map_y)" />
+
+        <param name="fake_map_z"
+               type="double"
+               value="$(arg fake_aruco_map_z)" />
+
+    </node>
+
+
+    <!-- ================================================================ -->
+    <!-- ARUCO GLOBAL-POSITION LISTENER                                  -->
+    <!-- ================================================================ -->
+
+    <node name="tf2_listener"
+          pkg="aruco_navigation"
+          type="tf2_listener"
+          respawn="false"
+          output="screen" />
+
+
+    <!-- ================================================================ -->
+    <!-- COMMON BATTERY MANAGER                                          -->
+    <!-- ================================================================ -->
+    <!--
+        No mode switch is required.
+
+        Emulator:
+            automatically reads /uavasr/battery and generates a repeatable
+            discharge profile for low-battery testing.
+
+        Physical UAV:
+            automatically detects /mavros/battery and forwards the real
+            BatteryState percentage unchanged.
+
+        Guidance always consumes /uav/battery.
+    -->
+    <node name="battery_manager"
+          pkg="spar_node"
+          type="battery_manager.py"
+          respawn="false"
+          output="screen">
+
+        <!-- Emulator test only. Ignored whenever MAVROS battery is present. -->
+        <param name="emulator_time_to_10_percent"
+               type="double"
+               value="600" />
+
+    </node>
+
+
+    <!-- ================================================================ -->
+    <!-- GROUP 6 GUIDANCE                                                -->
+    <!-- ================================================================ -->
+    <!--
+        launch-prefix is the startup gate.
+
+        The shell first waits until /uavasr/pose produces one message.
+        It then waits 75 seconds so RQT/RViz can be arranged.
+
+        "$0" and "$@" are the guidance executable and arguments that
+        roslaunch appends to this prefix.  exec then replaces the shell
+        with the actual guidance process.
+
+        required="true" means that when guidance exits after a successful
+        landing, the entire master launch shuts down, including SPAR.
+    -->
+
+    <node name="guidance"
+          pkg="spar_node"
+          type="landing"
+          respawn="false"
+          required="true"
+          output="screen"
+          launch-prefix="bash -c 'echo &quot;[TEAM6] Waiting for /uavasr/pose...&quot;; rostopic echo -n 1 /uavasr/pose &gt;/dev/null; echo &quot;[TEAM6] UAV pose received. 75 seconds to configure RQT/RViz...&quot;; sleep 75; echo &quot;[TEAM6] Starting autonomous mission.&quot;; exec &quot;$0&quot; &quot;$@&quot;'">
+
+        <!-- Designated landing ArUco marker -->
+        <param name="landing_aruco_id"
+               type="int"
+               value="$(arg landing_aruco_id)" />
+
+        <!-- Survey altitude -->
+        <param name="surveyAlt"
+               type="double"
+               value="1.5" />
+
+        <param name="vel_yaw"
+               type="double"
+               value="0.2" />
+
+        <!-- Takeoff and landing parameters -->
+        <param name="takeoff_speed"
+               type="double"
+               value="1.0" />
+
+        <param name="land_speed"
+               type="double"
+               value="0.1" />
+
+        <!-- Current O134 safety boundaries -->
+        <param name="safeRangeX"
+               type="double"
+               value="4.4" />
+
+        <param name="safeRangeY"
+               type="double"
+               value="3.3" />
+
+        <param name="safeRangeZ"
+               type="double"
+               value="4.0" />
+
+        <!-- SPAR action -->
+        <param name="action_topic"
+               type="string"
+               value="spar/flight" />
+
+        <!-- Common /uav/battery threshold: 0.10 = 10% -->
+        <param name="battery_threshold"
+               type="double"
+               value="$(arg battery_threshold)" />
+
+        <!-- Topic remaps used by the existing guidance script -->
+        <remap from="~/pose"
+               to="uavasr/pose" />
+
+        <remap from="~roi"
+               to="target_detection/roi" />
+
+    </node>
+
+</launch>

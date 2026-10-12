@@ -1,0 +1,1893 @@
+#!/usr/bin/env python3
+
+"""
+Important ROS Interfaces
+------------------------
+Inputs:
+    ~pose                           geometry_msgs/PoseStamped
+    /aruco_detection/world_markers  visualization_msgs/MarkerArray
+    /depthai_node/detection/pose    visualization_msgs/Marker
+    /uav/battery                    sensor_msgs/BatteryState
+
+Outputs:
+    /guidance/fullPath             nav_msgs/Path
+    /guidance/pathBreadcrum        nav_msgs/Path
+    /guidance/image_targets        visualization_msgs/MarkerArray
+    /actuator_control/servo1       std_msgs/Bool  (fire payload)
+    /actuator_control/servo2       std_msgs/Bool  (smoke payload)
+
+Services/Actions:
+    /breadcrumb/request_path
+    spar/flight
+"""
+
+import sys
+from math import floor, isinf, isnan
+from statistics import median
+
+import actionlib
+import rospy
+import tf2_geometry_msgs
+import tf2_ros
+from actionlib_msgs.msg import GoalStatus
+from geometry_msgs.msg import Point, PoseStamped
+from nav_msgs.msg import Path
+from sensor_msgs.msg import BatteryState
+from spar_msgs.msg import FlightMotionAction, FlightMotionGoal
+from std_msgs.msg import Bool, String
+from visualization_msgs.msg import Marker, MarkerArray
+
+from breadcrumb.srv import RequestPath, RequestPathRequest
+
+
+class Guidance:
+    """Mission guidance, Breadcrumb routing, image diversions and landing."""
+
+    def __init__(self, waypoints):
+        # Safe boundary values, default to the O134 mission limits.
+        self.safeRangeX = rospy.get_param("~safeRangeX", 4.4)
+        self.safeRangeY = rospy.get_param("~safeRangeY", 3.3)
+        self.safeRangeZ = rospy.get_param("~safeRangeZ", 4.0)
+
+        if not self.check_waypoints(waypoints):
+            raise ValueError("Invalid waypoint list input!")
+
+        self.waypoints = waypoints
+        self.nextWaypointIndex = 0
+
+        # Global frame used by survey waypoints and transformed detections.
+        # Emulator normally uses map; physical flight normally uses optitrack_world.
+        self.global_frame = rospy.get_param("~global_frame", "map")
+
+        # RViz path topics.
+        self.full_path_topic = "/guidance/fullPath"
+        self.breadcrumb_path_topic = "/guidance/pathBreadcrum"
+        self.path_publishers = {}
+
+        # Save the survey waypoints and publish the complete survey route.
+        self.display_path(waypoints, self.full_path_topic)
+
+        # Current vehicle state.
+        self.current_location = Point()
+        self.active_goal_wp = None
+
+        # Motion parameters.
+        self.vel_linear = rospy.get_param("~vel_linear", 0.5)
+        self.vel_yaw = rospy.get_param("~vel_yaw", 0.2)
+        self.land_speed = rospy.get_param("~land_speed", 0.1)
+        self.accuracy_pos = rospy.get_param("~acc_pos", 0.1)
+        self.accuracy_yaw = rospy.get_param("~acc_yaw", 0.1)
+        self.surveyAltitude = rospy.get_param("~surveyAlt", 1.5)
+
+        # Normal survey Breadcrumb state.
+        self.breadcrumbWPSnextIndex = 0
+        self.breadcrumbMode = False
+        self.breadcrumbWPS = []
+
+        # Payload actuator command publishers.
+        self.servo1 = rospy.Publisher(
+            "/actuator_control/servo1", Bool, queue_size=1
+        )
+        self.servo2 = rospy.Publisher(
+            "/actuator_control/servo2", Bool, queue_size=1
+        )
+
+        # Text-to-speech announcements.
+        self.chatter_publisher = rospy.Publisher(
+            "/chatter", String, queue_size=10
+        )
+
+        # -------------------------------------------------------------------
+        # ArUco landing state
+        # -------------------------------------------------------------------
+        self.landing_aruco_id = rospy.get_param("~landing_aruco_id", -1)
+        self.aruco_world_topic = rospy.get_param(
+            "~aruco_world_topic", "/aruco_detection/world_markers"
+        )
+        self.landing_marker_found = False
+        self.landing_marker_map_position = Point()
+
+        self.returning_to_land = False
+        self.landing_in_progress = False
+        self.landing_stage = "IDLE"
+        self.landing_target_description = ""
+
+        # Final landing profile after Breadcrumb reaches the selected X/Y.
+        self.landing_final_altitude = rospy.get_param(
+            "~landing_final_altitude", 0.5
+        )
+        self.landing_hover_time = rospy.get_param("~landing_hover_time", 5.0)
+
+        # If the configured battery failsafe occurs before the designated landing
+        # ArUco has been found, return to the known launch/safe point instead.
+        self.fallback_landing_x = rospy.get_param("~fallback_landing_x", -1.0)
+        self.fallback_landing_y = rospy.get_param("~fallback_landing_y", -1.0)
+
+        # -------------------------------------------------------------------
+        # Fire / smoke image diversion state
+        # -------------------------------------------------------------------
+        self.object_pose_topic = rospy.get_param(
+            "~object_pose_topic", "/depthai_node/detection/pose"
+        )
+        self.object_global_frame = self.global_frame
+        self.camera_name = rospy.get_param("~camera_name", "camera")
+
+        # Transform object detections from the camera frame into the same
+        # global frame used by the mission waypoints. This mirrors the ArUco
+        # camera -> global TF logic without requiring a second object topic.
+        self.object_tf_buffer = tf2_ros.Buffer()
+        self.object_tf_listener = tf2_ros.TransformListener(
+            self.object_tf_buffer
+        )
+        self.image_deploy_altitude = rospy.get_param(
+            "~image_deploy_altitude", 0.5
+        )
+        self.image_hover_time = rospy.get_param("~image_hover_time", 5.0)
+
+        # Image class is carried explicitly in Marker.text ("fire" or "smoke").
+        # /depthai_node/detection/pose carries a camera-relative pose in metres.
+        # The callback transforms it into the global mission frame, then uses only
+        # the resulting global X/Y for the diversion target.
+        # Marker.id is not used to decide the target class.
+
+        # Confirm each target using a short timed observation window. This keeps the
+        # fly-by response fast while rejecting a single isolated YOLO detection.
+        self.image_sample_duration = max(
+            0.1,
+            float(rospy.get_param("~image_sample_duration", 0.40)),
+        )
+        self.image_min_observations = max(
+            2,
+            int(rospy.get_param("~image_min_observations", 2)),
+        )
+        self.image_min_observation_span = max(
+            0.0,
+            float(rospy.get_param("~image_min_observation_span", 0.10)),
+        )
+
+        self.image_detection_samples = {"fire": [], "smoke": []}
+        self.image_detection_sample_times = {"fire": [], "smoke": []}
+        self.image_acquisition_started = {"fire": None, "smoke": None}
+
+        self.image_targets = {"fire": None, "smoke": None}
+        self.payload_deployed = {"fire": False, "smoke": False}
+        self.pending_image_targets = []
+
+        # Count complete survey passes. If either payload has not been deployed
+        # when a pass finishes, the grid is repeated from the beginning.
+        self.grid_search_pass = 1
+
+        # Persistent RViz target markers. A target is added only after its
+        # payload has been successfully deployed.
+        self.image_marker_topic = rospy.get_param(
+            "~image_marker_topic", "/guidance/image_targets"
+        )
+        self.image_marker_scale = rospy.get_param("~image_marker_scale", 0.18)
+        self.image_visual_points = {"fire": [], "smoke": []}
+        self.image_marker_pub = rospy.Publisher(
+            self.image_marker_topic, MarkerArray, queue_size=1, latch=True
+        )
+        # Clear stale markers exactly once when this node starts. Later marker
+        # publishes contain the complete set of deployed fire/smoke targets and
+        # never issue DELETEALL again, so the first marker cannot erase the second.
+        self.clear_image_target_markers()
+
+        self.performing_image_diversion = False
+        self.image_diversion_request_pending = False
+        self.image_diversion_state = "IDLE"
+        self.image_diversion_type = None
+        self.image_diversion_target = Point()
+        self.image_interrupted_location = Point()
+        self.image_interrupted_goal_wp = None
+        self.image_breadcrumb_wps = []
+        self.image_breadcrumb_index = 0
+        self.defer_pending_image_until_survey_progress = False
+
+        #rospy.loginfo(
+        #    "Image targeting: %.2f s observation window, minimum %d observations "
+        #    "spanning at least %.2f s. RViz markers publish only after payload deployment.",
+        #    self.image_sample_duration,
+        #    self.image_min_observations,
+        #    self.image_min_observation_span,
+        #)
+
+        # -------------------------------------------------------------------
+        # Battery failsafe
+        # -------------------------------------------------------------------
+        # BatteryState.percentage is 0.0 to 1.0; default 0.15 means 15%.
+        self.battery_threshold = rospy.get_param("~battery_threshold", 0.15)
+        self.last_battery_percentage = None
+        self.low_battery_triggered = False
+        self.low_battery_return_pending = False
+        self.next_battery_log_percent = None
+
+        # Set True only after SPAR reports that the final LAND command completed.
+        # The shutdown callback uses this to avoid cancelling an already-finished
+        # landing goal.
+        self.mission_complete = False
+
+        # Create our action client.
+        action_ns = rospy.get_param("~action_topic", "spar/flight")
+        self.spar_client = actionlib.SimpleActionClient(
+            action_ns, FlightMotionAction
+        )
+        #rospy.loginfo("Waiting for spar...")
+        self.spar_client.wait_for_server()
+
+        # Wait to connect with Breadcrumb. Code will error if you try to connect
+        # to a service that does not exist.
+        rospy.wait_for_service("/breadcrumb/request_path")
+        self.srvc_bc = rospy.ServiceProxy(
+            "/breadcrumb/request_path", RequestPath
+        )
+
+        # Subscribers are active throughout the mission so the latest vehicle
+        # position, world-marker list, camera-relative object detections and
+        # battery state are available.
+        self.sub_pose = rospy.Subscriber(
+            "~pose", PoseStamped, self.callback_pose, queue_size=1
+        )
+        self.sub_aruco_world = rospy.Subscriber(
+            self.aruco_world_topic,
+            MarkerArray,
+            self.callback_aruco_world,
+            queue_size=1,
+        )
+        self.sub_object_pose = rospy.Subscriber(
+            self.object_pose_topic,
+            Marker,
+            self.callback_object_pose,
+            queue_size=10,
+        )
+        self.sub_battery = rospy.Subscriber(
+            "/uav/battery",
+            BatteryState,
+            self.callback_battery,
+            queue_size=1,
+        )
+
+        rospy.on_shutdown(self.shutdown)
+
+        if not rospy.is_shutdown():
+            rospy.loginfo("Starting waypoint mission")
+
+            #New Takeoff Fun Caller
+            #rospy.loginfo("Performing safe takeoff...")
+            self.chatter_publisher.publish(String(data="Beginning takeoff sequence"))
+            if not self.send_takeoff():
+                rospy.signal_shutdown("Takeoff failed")
+                return
+
+            rospy.loginfo("Takeoff successful. Proceeding to first waypoint...")
+            self.send_wp(self.waypoints[0])
+            self.nextWaypointIndex = 1
+
+            # Setup a timer to check if our waypoint has completed at 20Hz.
+            #rospy.loginfo("Setting callbacks")
+            self.timer = rospy.Timer(
+                rospy.Duration(1.0 / 20.0), self.check_waypoint_status
+            )
+            #rospy.loginfo("Running callbacks while not shutdown...")
+
+    # -----------------------------------------------------------------------
+    # Validation and cleanup
+    # -----------------------------------------------------------------------
+    def check_waypoints(self, wps):
+        # Make sure waypoints are a list.
+        if not isinstance(wps, list):
+            rospy.logwarn("Waypoints are not list")
+            return False
+
+        # Make sure we have at least one waypoint.
+        if len(wps) < 1:
+            rospy.logwarn("Waypoints list is empty")
+            return False
+
+        for i, wp in enumerate(wps):
+            if not self.check_waypoint(wp):
+                rospy.logwarn("Waypoint %i did not pass check", i + 1)
+                return False
+
+        return True
+
+    def check_waypoint(self, wp):
+        if not isinstance(wp, list):
+            rospy.logwarn("Waypoint is not a list of coordinates")
+            return False
+
+        if len(wp) != 4:
+            rospy.logwarn(
+                "Waypoint has an invalid length (must be X/Y/Z/Yaw)"
+            )
+            return False
+
+        if (
+            abs(wp[0]) > self.safeRangeX
+            or abs(wp[1]) > self.safeRangeY
+            or wp[2] < 0.0
+            or wp[2] > self.safeRangeZ
+        ):
+            rospy.logwarn(
+                "Waypoint outside safe range: "
+                "-%0.2f<X<%0.2f / -%0.2f<Y<%0.2f / 0<Z<%0.2f",
+                self.safeRangeX,
+                self.safeRangeX,
+                self.safeRangeY,
+                self.safeRangeY,
+                self.safeRangeZ,
+            )
+            return False
+
+        return True
+
+    # Called automatically by rospy when this node exits. A successful landing
+    # sets mission_complete=True before requesting ROS shutdown, so the finished
+    # LAND action is not cancelled during cleanup.
+    def shutdown(self):
+        rospy.loginfo("Unregistering topics and shutting down...")
+
+        if hasattr(self, "timer"):
+            self.timer.shutdown()
+
+        for sub_name in (
+            "sub_pose",
+            "sub_aruco_world",
+            "sub_object_pose",
+            "sub_battery",
+        ):
+            if hasattr(self, sub_name):
+                getattr(self, sub_name).unregister()
+
+        if hasattr(self, "spar_client") and not self.mission_complete:
+            state = self.spar_client.get_state()
+            if state in (GoalStatus.PENDING, GoalStatus.ACTIVE):
+                self.spar_client.cancel_goal()
+
+        rospy.loginfo("Guidance stopped")
+
+    # Update the UAV's latest global position.
+    def callback_pose(self, msg_in):
+        self.current_location.x = msg_in.pose.position.x
+        self.current_location.y = msg_in.pose.position.y
+        self.current_location.z = msg_in.pose.position.z
+
+    # -----------------------------------------------------------------------
+    # ArUco world marker storage
+    # -----------------------------------------------------------------------
+    def callback_aruco_world(self, msg_in):
+        for marker in msg_in.markers:
+            if int(marker.id) == self.landing_aruco_id:
+                first_detection = not self.landing_marker_found
+                self.landing_marker_found = True
+                self.landing_marker_map_position.x = marker.pose.position.x
+                self.landing_marker_map_position.y = marker.pose.position.y
+                self.landing_marker_map_position.z = marker.pose.position.z
+
+                if first_detection:
+                    rospy.loginfo(
+                        "Landing ArUco ID %d stored at XY [%.2f, %.2f].",
+                        self.landing_aruco_id,
+                        self.landing_marker_map_position.x,
+                        self.landing_marker_map_position.y,
+                    )
+                break
+
+    def get_landing_marker_from_world(self, wait_timeout=0.0):
+        """Return the designated landing marker XY when it has been stored."""
+        if self.landing_marker_found:
+            return (
+                self.landing_marker_map_position.x,
+                self.landing_marker_map_position.y,
+            )
+
+        # Normal mission completion is allowed a short wait for the GCS marker
+        # list. Low battery does not wait: if the marker is not already known,
+        # the fallback [-1,-1] safe point is used immediately.
+        if wait_timeout > 0.0:
+            try:
+                msg = rospy.wait_for_message(
+                    self.aruco_world_topic, MarkerArray, timeout=wait_timeout
+                )
+                self.callback_aruco_world(msg)
+            except rospy.ROSException:
+                pass
+
+        if self.landing_marker_found:
+            return (
+                self.landing_marker_map_position.x,
+                self.landing_marker_map_position.y,
+            )
+
+        return None
+
+    # -----------------------------------------------------------------------
+    # Battery failsafe
+    # -----------------------------------------------------------------------
+    def callback_battery(self, msg_in):
+        percentage = msg_in.percentage
+
+        # Some physical battery configurations report an unknown percentage as
+        # NaN or a negative value. Ignore those values rather than triggering a
+        # false emergency landing.
+        if isnan(percentage) or isinf(percentage) or percentage < 0.0:
+            rospy.logwarn_throttle(
+                10.0,
+                "Battery percentage unavailable; low-battery failsafe cannot evaluate.",
+            )
+            return
+
+        percentage = max(0.0, min(1.0, percentage))
+        self.last_battery_percentage = percentage
+
+        battery_percent = percentage * 100.0
+        threshold_percent = self.battery_threshold * 100.0
+
+        # Do not print battery state every few seconds. Report only when another
+        # 10% boundary is crossed (100, 90, 80, ... 10).
+        if self.next_battery_log_percent is None:
+            self.next_battery_log_percent = int(
+                floor(battery_percent / 10.0) * 10
+            )
+
+        if (
+            self.next_battery_log_percent >= 10
+            and battery_percent <= self.next_battery_log_percent + 0.05
+        ):
+            rospy.loginfo(
+                "Battery remaining: %d%%", self.next_battery_log_percent
+            )
+            self.chatter_publisher.publish(
+                String(
+                    data="Battery remaining: {} percent".format(
+                        self.next_battery_log_percent
+                    )
+                )
+            )
+            self.next_battery_log_percent -= 10
+
+        # Compare the percentage as displayed to one decimal place. This avoids
+        # a floating-point edge case where the displayed threshold value is microscopically
+        # above the configured threshold and therefore fails to trigger.
+        if round(battery_percent, 1) > round(threshold_percent, 1):
+            return
+
+        if self.low_battery_triggered or self.mission_complete:
+            return
+
+        self.low_battery_triggered = True
+        self.low_battery_return_pending = True
+
+        self.chatter_publisher.publish(
+            String(data="Battery safety threshold reached")
+        )
+
+        if self.landing_marker_found:
+            rospy.logwarn(
+                "LOW BATTERY FAILSAFE: %.1f%% remaining. "
+                "Returning to landing ArUco ID %d.",
+                battery_percent,
+                self.landing_aruco_id,
+            )
+        else:
+            rospy.logwarn(
+                "LOW BATTERY FAILSAFE: %.1f%% remaining. Landing ArUco ID %d "
+                "has not been found; returning to fallback XY [%.2f, %.2f].",
+                battery_percent,
+                self.landing_aruco_id,
+                self.fallback_landing_x,
+                self.fallback_landing_y,
+            )
+
+        # Low battery takes priority over image diversions and survey routing.
+        self.performing_image_diversion = False
+        self.image_diversion_request_pending = False
+        self.image_diversion_state = "IDLE"
+        self.pending_image_targets = []
+
+        state = self.spar_client.get_state()
+        if state in (GoalStatus.PENDING, GoalStatus.ACTIVE):
+            self.spar_client.cancel_goal()
+
+    # -----------------------------------------------------------------------
+    # Image detection / payload diversions
+    # -----------------------------------------------------------------------
+    def classify_image_marker(self, marker):
+        """Return 'fire' or 'smoke' from Marker.text."""
+        label = marker.text.strip().lower()
+
+        if label == "fire":
+            return "fire"
+        if label == "smoke":
+            return "smoke"
+
+        return None
+
+    def _lookup_object_transform(self, source_frame, stamp):
+        """Use the detection timestamp when possible, then fall back to latest TF."""
+        try:
+            return self.object_tf_buffer.lookup_transform(
+                self.object_global_frame,
+                source_frame,
+                stamp,
+                rospy.Duration(0.35),
+            )
+        except tf2_ros.ExtrapolationException:
+            if stamp != rospy.Time(0):
+                rospy.logwarn_throttle(
+                    2.0,
+                    "Object TF was unavailable at detection time; using latest transform.",
+                )
+                return self.object_tf_buffer.lookup_transform(
+                    self.object_global_frame,
+                    source_frame,
+                    rospy.Time(0),
+                    rospy.Duration(0.35),
+                )
+            raise
+
+    def clear_image_target_markers(self):
+        """Clear stale deployment markers once at node startup."""
+        marker_array = MarkerArray()
+        clear_marker = Marker()
+        clear_marker.header.frame_id = self.global_frame
+        clear_marker.header.stamp = rospy.Time.now()
+        clear_marker.action = Marker.DELETEALL
+        marker_array.markers.append(clear_marker)
+        self.image_marker_pub.publish(marker_array)
+
+    def _record_image_visualisation(self, target_type, x, y, z):
+        """Store the UAV position where this payload was actually deployed."""
+        point = Point()
+        point.x = x
+        point.y = y
+        point.z = z
+        self.image_visual_points[target_type] = [point]
+        self.publish_image_target_markers()
+
+    def publish_image_target_markers(self):
+        """Publish the complete set of confirmed fire/smoke deployment markers."""
+        marker_array = MarkerArray()
+        stamp = rospy.Time.now()
+
+        for target_type in ("fire", "smoke"):
+            if not self.payload_deployed[target_type]:
+                continue
+
+            points = self.image_visual_points[target_type]
+            if not points:
+                continue
+
+            point = points[0]
+            marker = Marker()
+            marker.header.frame_id = self.global_frame
+            marker.header.stamp = stamp
+            marker.ns = "deployed_image_targets"
+            marker.id = 0 if target_type == "fire" else 1
+            marker.type = Marker.CYLINDER
+            marker.action = Marker.ADD
+            marker.pose.position.x = point.x
+            marker.pose.position.y = point.y
+            marker.pose.position.z = point.z
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = self.image_marker_scale
+            marker.scale.y = self.image_marker_scale
+            marker.scale.z = 0.08
+
+            if target_type == "fire":
+                marker.color.r = 1.0
+                marker.color.g = 0.0
+                marker.color.b = 0.0
+            else:
+                marker.color.r = 0.0
+                marker.color.g = 0.0
+                marker.color.b = 0.0
+
+            marker.color.a = 1.0
+            marker.lifetime = rospy.Duration(0)
+            marker_array.markers.append(marker)
+
+            # White text makes the black smoke marker easy to locate on RViz's
+            # usual dark background without changing the target marker colour.
+            label = Marker()
+            label.header.frame_id = self.global_frame
+            label.header.stamp = stamp
+            label.ns = "deployed_image_target_labels"
+            label.id = 10 if target_type == "fire" else 11
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+            label.pose.position.x = point.x
+            label.pose.position.y = point.y
+            label.pose.position.z = point.z + 0.20
+            label.pose.orientation.w = 1.0
+            label.scale.z = 0.18
+            label.color.r = 1.0
+            label.color.g = 1.0
+            label.color.b = 1.0
+            label.color.a = 1.0
+            label.text = target_type.upper()
+            label.lifetime = rospy.Duration(0)
+            marker_array.markers.append(label)
+
+        rospy.loginfo(
+            "Publishing %d deployed target marker(s) on %s.",
+            sum(1 for t in ("fire", "smoke") if self.payload_deployed[t] and self.image_visual_points[t]),
+            self.image_marker_topic,
+        )
+        self.image_marker_pub.publish(marker_array)
+
+    def _reset_image_samples(self, target_type):
+        self.image_detection_samples[target_type] = []
+        self.image_detection_sample_times[target_type] = []
+        self.image_acquisition_started[target_type] = None
+
+    def _append_image_sample(self, target_type, x, y, z):
+        """
+        Collect one valid in-bounds observation during the short timed window.
+
+        Missed YOLO detections do not reset the window. The target only needs
+        multiple valid observations separated in real time; there is no
+        consecutive-frame requirement.
+        """
+
+        if abs(x) > self.safeRangeX or abs(y) > self.safeRangeY:
+            rospy.logwarn_throttle(
+                1.0,
+                "%s detection XY [%.2f, %.2f] is outside safe bounds; "
+                "ignoring it and leaving the target available for reacquisition.",
+                target_type.capitalize(),
+                x,
+                y,
+            )
+            return False
+
+        samples = self.image_detection_samples[target_type]
+        sample_times = self.image_detection_sample_times[target_type]
+        now = rospy.Time.now()
+        sample_time = now.to_sec()
+
+        if self.image_acquisition_started[target_type] is None:
+            self.image_acquisition_started[target_type] = now
+            rospy.loginfo(
+                "%s target seen. Collecting observations for %.2f s.",
+                target_type.capitalize(),
+                self.image_sample_duration,
+            )
+
+        sample = Point()
+        sample.x = x
+        sample.y = y
+        sample.z = z
+
+        samples.append(sample)
+        sample_times.append(sample_time)
+
+        rospy.loginfo_throttle(
+            0.25,
+            "%s target observation window contains %d valid observation(s).",
+            target_type.capitalize(),
+            len(samples),
+        )
+
+        return True
+
+    def _finalize_image_acquisition_if_ready(self, target_type):
+        """
+        Finalize the target once the observation window expires.
+
+        At least image_min_observations must have been received and the first
+        and last accepted observations must be separated by
+        image_min_observation_span seconds. This rejects a one-off hallucination
+        without requiring five consecutive camera frames.
+        """
+
+        if (
+            self.low_battery_triggered
+            or self.returning_to_land
+            or self.landing_in_progress
+            or self.mission_complete
+            or self.payload_deployed[target_type]
+            or self.image_targets[target_type] is not None
+        ):
+            return False
+
+        started = self.image_acquisition_started[target_type]
+        if started is None:
+            return False
+
+        elapsed = (rospy.Time.now() - started).to_sec()
+        if elapsed < self.image_sample_duration:
+            return False
+
+        samples = self.image_detection_samples[target_type]
+        sample_times = self.image_detection_sample_times[target_type]
+
+        if len(samples) < self.image_min_observations:
+            rospy.logwarn(
+                "%s target rejected after %.2f s: only %d valid observation(s) "
+                "were received; at least %d are required.",
+                target_type.capitalize(),
+                elapsed,
+                len(samples),
+                self.image_min_observations,
+            )
+            self._reset_image_samples(target_type)
+            return False
+
+        observation_span = sample_times[-1] - sample_times[0]
+
+        if observation_span < self.image_min_observation_span:
+            rospy.logwarn(
+                "%s target rejected: observations only spanned %.3f s; "
+                "at least %.3f s is required.",
+                target_type.capitalize(),
+                observation_span,
+                self.image_min_observation_span,
+            )
+            self._reset_image_samples(target_type)
+            return False
+
+        target = Point()
+        target.x = median([sample.x for sample in samples])
+        target.y = median([sample.y for sample in samples])
+        target.z = median([sample.z for sample in samples])
+
+        target_wp = [
+            target.x,
+            target.y,
+            self.surveyAltitude,
+            0.0,
+        ]
+
+        if not self.check_waypoint(target_wp):
+            rospy.logwarn(
+                "%s median target estimate [%.2f, %.2f] is outside safe bounds; "
+                "discarding it and waiting to reacquire the target.",
+                target_type.capitalize(),
+                target.x,
+                target.y,
+            )
+            self._reset_image_samples(target_type)
+            return False
+
+        sample_count = len(samples)
+
+        self.image_targets[target_type] = target
+        self._reset_image_samples(target_type)
+
+        if target_type not in self.pending_image_targets:
+            self.pending_image_targets.append(target_type)
+
+        rospy.loginfo(
+            "%s target confirmed from %d valid observations spanning %.3f s. "
+            "Median global XY [%.2f, %.2f].",
+            target_type.capitalize(),
+            sample_count,
+            observation_span,
+            target.x,
+            target.y,
+        )
+
+        if not self.performing_image_diversion:
+            self.image_diversion_request_pending = True
+
+        return True
+
+    def callback_object_pose(self, msg_in):
+        if (
+            self.low_battery_triggered
+            or self.returning_to_land
+            or self.landing_in_progress
+            or self.mission_complete
+        ):
+            return
+
+        target_type = self.classify_image_marker(msg_in)
+
+        if target_type is None:
+            rospy.logwarn_throttle(
+                5.0,
+                "Image detection received but Marker.text was not 'fire' or 'smoke'.",
+            )
+            return
+
+        if self.payload_deployed[target_type]:
+            return
+
+        if self.image_targets[target_type] is not None:
+            return
+
+        source_frame = msg_in.header.frame_id.strip()
+        if not source_frame:
+            source_frame = self.camera_name
+
+        detection_stamp = msg_in.header.stamp
+
+        pose_in = PoseStamped()
+        pose_in.header.stamp = detection_stamp
+        pose_in.header.frame_id = source_frame
+        pose_in.pose = msg_in.pose
+
+        try:
+            transform = self._lookup_object_transform(
+                source_frame,
+                detection_stamp,
+            )
+            pose_global = tf2_geometry_msgs.do_transform_pose(
+                pose_in,
+                transform,
+            )
+
+        except (
+            tf2_ros.LookupException,
+            tf2_ros.ConnectivityException,
+            tf2_ros.ExtrapolationException,
+        ) as error:
+            rospy.logwarn_throttle(
+                2.0,
+                "Could not transform object detection from %s to %s: %s",
+                source_frame,
+                self.object_global_frame,
+                str(error),
+            )
+            return
+
+        x = pose_global.pose.position.x
+        y = pose_global.pose.position.y
+        z = pose_global.pose.position.z
+
+        if any(
+            (
+                isnan(x),
+                isinf(x),
+                isnan(y),
+                isinf(y),
+                isnan(z),
+                isinf(z),
+            )
+        ):
+            rospy.logwarn(
+                "Ignoring image detection with invalid global coordinates."
+            )
+            return
+
+        self._append_image_sample(
+            target_type,
+            x,
+            y,
+            z,
+        )
+
+    def start_next_image_diversion(self):
+        if self.performing_image_diversion:
+            return False
+
+        while self.pending_image_targets:
+            target_type = self.pending_image_targets.pop(0)
+            if not self.payload_deployed[target_type]:
+                break
+        else:
+            self.image_diversion_request_pending = False
+            return False
+
+        target = self.image_targets[target_type]
+        if target is None:
+            self.image_diversion_request_pending = False
+            return False
+
+        self.performing_image_diversion = True
+        self.image_diversion_request_pending = False
+        self.image_diversion_state = "WAIT_CANCEL"
+        self.image_diversion_type = target_type
+        self.image_diversion_target.x = target.x
+        self.image_diversion_target.y = target.y
+
+        # Record the exact XY where the survey was interrupted. After payload
+        # deployment the UAV returns here at survey altitude using Breadcrumb.
+        self.image_interrupted_location.x = self.current_location.x
+        self.image_interrupted_location.y = self.current_location.y
+        self.image_interrupted_location.z = self.surveyAltitude
+
+        # Remember the survey/Breadcrumb SPAR goal that was active so the same
+        # goal can be re-issued after the UAV returns to the interruption point.
+        self.image_interrupted_goal_wp = (
+            list(self.active_goal_wp) if self.active_goal_wp is not None else None
+        )
+
+        rospy.loginfo(
+            "Starting %s diversion from XY [%.2f, %.2f] to target XY [%.2f, %.2f].",
+            target_type,
+            self.image_interrupted_location.x,
+            self.image_interrupted_location.y,
+            target.x,
+            target.y,
+        )
+
+        self.chatter_publisher.publish(
+            String(data="Diverting to {}".format(target_type))
+        )
+
+        state = self.spar_client.get_state()
+        if state in (GoalStatus.PENDING, GoalStatus.ACTIVE):
+            self.spar_client.cancel_goal()
+
+        return True
+
+    def abort_image_diversion_and_resume(self, reason, reacquire_target=True):
+        """Stop an unsafe diversion without deploying and resume the survey."""
+        target_type = self.image_diversion_type
+        rospy.logerr("Image diversion aborted: %s", reason)
+
+        if reacquire_target and target_type in self.image_targets:
+            if not self.payload_deployed[target_type]:
+                self.image_targets[target_type] = None
+                self._reset_image_samples(target_type)
+
+        self.performing_image_diversion = False
+        self.image_diversion_request_pending = False
+        self.image_diversion_state = "IDLE"
+        self.image_diversion_type = None
+        self.image_breadcrumb_wps = []
+        self.image_breadcrumb_index = 0
+        self.pending_image_targets = [
+            item for item in self.pending_image_targets if item != target_type
+        ]
+
+        resume_wp = self.image_interrupted_goal_wp
+        self.image_interrupted_goal_wp = None
+
+        if (
+            resume_wp is not None
+            and not self.low_battery_triggered
+            and not self.returning_to_land
+            and not self.landing_in_progress
+        ):
+            if not self.send_wp(resume_wp):
+                rospy.logerr("Could not resume the interrupted survey goal.")
+                rospy.signal_shutdown("Survey resume waypoint rejected")
+
+    def handle_image_diversion(self, state):
+        if self.low_battery_triggered:
+            return
+
+
+
+        # The survey/SPAR goal is deliberately cancelled when an image diversion
+        # starts. Handle that cancellation before treating ABORTED/REJECTED as a
+        # real diversion failure, because SPAR may report either state while the
+        # cancelled survey goal is being cleared.
+        if self.image_diversion_state == "WAIT_CANCEL":
+            if state in (
+                GoalStatus.PENDING,
+                GoalStatus.ACTIVE,
+                GoalStatus.PREEMPTING,
+                GoalStatus.RECALLING,
+            ):
+                return
+
+            if state in (GoalStatus.ABORTED, GoalStatus.REJECTED):
+                rospy.logwarn(
+                    "Previous SPAR goal ended with state %d during deliberate "
+                    "image-diversion cancellation; continuing diversion.",
+                    state,
+                )
+
+            target_wp = [
+                self.image_diversion_target.x,
+                self.image_diversion_target.y,
+                self.surveyAltitude,
+                0.0,
+            ]
+
+            path = self.request_breadcrumb_path(
+                self.current_location,
+                target_wp,
+                "%s target" % self.image_diversion_type,
+            )
+            if path is None:
+                rospy.signal_shutdown("No image-target Breadcrumb path")
+                return
+
+            self.image_breadcrumb_wps = path
+            self.image_breadcrumb_index = 0
+            self.image_diversion_state = "TO_TARGET_BREADCRUMB"
+            if not self.send_next_image_breadcrumb_wp():
+                self.abort_image_diversion_and_resume(
+                    "Could not send first Breadcrumb waypoint to image target."
+                )
+            return
+
+        if state in (GoalStatus.ABORTED, GoalStatus.REJECTED):
+            rospy.logerr(
+                "Image diversion SPAR goal failed. state=%d, diversion_state=%s, "
+                "type=%s, target=[%.2f, %.2f], UAV=[%.2f, %.2f, %.2f]",
+                state,
+                self.image_diversion_state,
+                str(self.image_diversion_type),
+                self.image_diversion_target.x,
+                self.image_diversion_target.y,
+                self.current_location.x,
+                self.current_location.y,
+                self.current_location.z,
+            )
+            self.abort_image_diversion_and_resume(
+                "SPAR rejected or aborted an image-diversion motion goal."
+            )
+            return
+
+        if state != GoalStatus.SUCCEEDED:
+            return
+
+        if self.image_diversion_state == "TO_TARGET_BREADCRUMB":
+            if self.image_breadcrumb_index < len(self.image_breadcrumb_wps):
+                if not self.send_next_image_breadcrumb_wp():
+                    self.abort_image_diversion_and_resume(
+                        "Breadcrumb waypoint to image target was rejected."
+                    )
+                return
+
+            descent_wp = [
+                self.image_diversion_target.x,
+                self.image_diversion_target.y,
+                self.image_deploy_altitude,
+                0.0,
+            ]
+            rospy.loginfo(
+                "Reached %s XY. Descending to %.2f m.",
+                self.image_diversion_type,
+                self.image_deploy_altitude,
+            )
+            if not self.send_wp(descent_wp):
+                self.abort_image_diversion_and_resume(
+                    "Descent waypoint was outside safe bounds or could not be sent."
+                )
+                return
+            self.image_diversion_state = "DESCEND"
+            return
+
+        if self.image_diversion_state == "DESCEND":
+            rospy.loginfo(
+                "At %.2f m above %s. Hovering for %.1f seconds before payload deployment...",
+                self.image_deploy_altitude,
+                self.image_diversion_type,
+                self.image_hover_time,
+            )
+            rospy.sleep(rospy.Duration(self.image_hover_time))
+
+            # Battery failsafe may have triggered during the five-second hover.
+            if self.low_battery_triggered:
+                return
+
+            self.deploy_payload(self.image_diversion_type)
+
+            ascend_wp = [
+                self.image_diversion_target.x,
+                self.image_diversion_target.y,
+                self.surveyAltitude,
+                0.0,
+            ]
+            rospy.loginfo(
+                "%s payload complete. Ascending to survey altitude %.2f m.",
+                self.image_diversion_type.capitalize(),
+                self.surveyAltitude,
+            )
+            if not self.send_wp(ascend_wp):
+                rospy.logerr("Could not send post-payload ascent waypoint.")
+                rospy.signal_shutdown("Image diversion ascent waypoint rejected")
+                return
+            self.image_diversion_state = "ASCEND"
+            return
+
+        if self.image_diversion_state == "ASCEND":
+            return_wp = [
+                self.image_interrupted_location.x,
+                self.image_interrupted_location.y,
+                self.surveyAltitude,
+                0.0,
+            ]
+
+            path = self.request_breadcrumb_path(
+                self.current_location,
+                return_wp,
+                "image diversion return",
+            )
+            if path is None:
+                rospy.signal_shutdown("No image-return Breadcrumb path")
+                return
+
+            self.image_breadcrumb_wps = path
+            self.image_breadcrumb_index = 0
+            self.image_diversion_state = "RETURN_BREADCRUMB"
+            if not self.send_next_image_breadcrumb_wp():
+                rospy.logerr("Could not send first Breadcrumb waypoint back to survey.")
+                rospy.signal_shutdown("Image return Breadcrumb waypoint rejected")
+            return
+
+        if self.image_diversion_state == "RETURN_BREADCRUMB":
+            if self.image_breadcrumb_index < len(self.image_breadcrumb_wps):
+                if not self.send_next_image_breadcrumb_wp():
+                    rospy.logerr("Image-return Breadcrumb waypoint was rejected.")
+                    rospy.signal_shutdown("Image return Breadcrumb waypoint rejected")
+                return
+
+            completed_type = self.image_diversion_type
+            self.performing_image_diversion = False
+            self.image_diversion_state = "IDLE"
+            self.image_diversion_type = None
+            self.image_breadcrumb_wps = []
+            self.image_breadcrumb_index = 0
+
+            rospy.loginfo(
+                "%s diversion complete. Returned to interrupted survey XY [%.2f, %.2f].",
+                completed_type.capitalize(),
+                self.image_interrupted_location.x,
+                self.image_interrupted_location.y,
+            )
+
+            # Resume the exact survey/Breadcrumb goal that was active at the
+            # moment of interruption. Normal survey state then continues from
+            # where it left off.
+            if self.image_interrupted_goal_wp is not None:
+                if not self.send_wp(self.image_interrupted_goal_wp):
+                    rospy.logerr("Could not resume interrupted survey waypoint.")
+                    rospy.signal_shutdown("Interrupted survey waypoint rejected")
+                    return
+            else:
+                rospy.logwarn(
+                    "No interrupted survey goal was stored; continuing from current position."
+                )
+
+            # If the other target was seen during this diversion, wait until the
+            # resumed survey goal completes before starting that second diversion.
+            self.defer_pending_image_until_survey_progress = bool(
+                self.pending_image_targets
+            )
+            self.image_interrupted_goal_wp = None
+            return
+
+    def send_next_image_breadcrumb_wp(self):
+        if self.image_breadcrumb_index >= len(self.image_breadcrumb_wps):
+            return True
+
+        wp = self.image_breadcrumb_wps[self.image_breadcrumb_index]
+        if not self.send_wp(wp):
+            return False
+
+        self.image_breadcrumb_index += 1
+        return True
+
+    def deploy_payload(self, target_type):
+        if self.payload_deployed[target_type]:
+            return
+
+        if target_type == "fire":
+            rospy.loginfo("Deploying payload at fire target.")
+            self.chatter_publisher.publish(
+                String(data="Deploying payload at fire target")
+            )
+            self.servo1.publish(False)
+        elif target_type == "smoke":
+            rospy.loginfo("Deploying payload at smoke target.")
+            self.chatter_publisher.publish(
+                String(data="Deploying payload at smoke target")
+            )
+            self.servo2.publish(False)
+        else:
+            rospy.logerr("Unknown payload target type: %s", target_type)
+            return
+
+        # Capture the actual UAV XY at the instant the payload is released.
+        # The RViz marker represents this deployment position, not the estimated
+        # target position that was used to command the diversion.
+        deployment_x = self.current_location.x
+        deployment_y = self.current_location.y
+        deployment_z = self.current_location.z
+
+        self.payload_deployed[target_type] = True
+
+        rospy.loginfo(
+            "%s payload deployed at actual UAV XY [%.2f, %.2f] "
+            "(estimated target XY [%.2f, %.2f]).",
+            target_type.capitalize(),
+            deployment_x,
+            deployment_y,
+            self.image_diversion_target.x,
+            self.image_diversion_target.y,
+        )
+
+        # Only confirmed payload-deployment locations are visualised in RViz.
+        # Fire is red and smoke is black.
+        self._record_image_visualisation(
+            target_type,
+            deployment_x,
+            deployment_y,
+            deployment_z,
+        )
+
+    # -----------------------------------------------------------------------
+    # Breadcrumb helpers
+    # -----------------------------------------------------------------------
+    def request_breadcrumb_path(self, start_point, end_wp, description):
+        req = RequestPathRequest()
+        req.start.x = start_point.x
+        req.start.y = start_point.y
+        req.start.z = start_point.z
+        req.end.x = end_wp[0]
+        req.end.y = end_wp[1]
+        req.end.z = end_wp[2]
+
+        try:
+            res = self.srvc_bc(req)
+        except rospy.ServiceException as error:
+            rospy.logerr("Breadcrumb service failed: %s", str(error))
+            return None
+
+        if len(res.path_sparse.poses) == 0:
+            rospy.logerr("Breadcrumb could not find a path for %s.", description)
+            return None
+
+        poses = res.path_sparse.poses
+
+        # RViz receives the complete sparse Breadcrumb solution, including the
+        # first/start pose. SPAR still skips that first pose so the UAV is not
+        # commanded back to the cell it is already occupying.
+        breadcrumb_visual_wps = []
+        for pose in poses:
+            breadcrumb_visual_wps.append(
+                [
+                    pose.position.x,
+                    pose.position.y,
+                    pose.position.z,
+                    0.0,
+                ]
+            )
+
+        breadcrumb_wps = []
+        start_index = 1 if len(poses) > 1 else 0
+
+        for pose in poses[start_index:]:
+            wp = [
+                pose.position.x,
+                pose.position.y,
+                pose.position.z,
+                0.0,
+            ]
+
+            if not self.check_waypoint(wp):
+                rospy.logerr(
+                    "Breadcrumb generated unsafe waypoint for %s: "
+                    "[%.2f, %.2f, %.2f]",
+                    description,
+                    wp[0],
+                    wp[1],
+                    wp[2],
+                )
+                return None
+
+            breadcrumb_wps.append(wp)
+
+        if len(breadcrumb_wps) == 0:
+            # If start and end collapse into the same grid cell, use the exact
+            # requested endpoint rather than treating the route as a failure.
+            if self.check_waypoint(end_wp):
+                breadcrumb_wps.append(list(end_wp))
+            else:
+                return None
+
+        # Publish the complete Breadcrumb response for RViz. The publisher is
+        # latched, so RViz also receives the latest route if it connects later.
+        self.display_path(
+            breadcrumb_visual_wps,
+            self.breadcrumb_path_topic,
+        )
+
+        return breadcrumb_wps
+
+    # -----------------------------------------------------------------------
+    # Landing
+    # -----------------------------------------------------------------------
+    def start_return_to_land(self, low_battery=False):
+        if self.returning_to_land or self.landing_in_progress:
+            return
+
+        if low_battery:
+            landing_xy = self.get_landing_marker_from_world(wait_timeout=0.0)
+            if landing_xy is None:
+                landing_xy = (
+                    self.fallback_landing_x,
+                    self.fallback_landing_y,
+                )
+                self.landing_target_description = "fallback XY [%.2f, %.2f]" % (
+                    landing_xy[0],
+                    landing_xy[1],
+                )
+                rospy.logwarn(
+                    "Landing ArUco ID %d was not found before low battery. "
+                    "Using fallback landing XY [%.2f, %.2f].",
+                    self.landing_aruco_id,
+                    landing_xy[0],
+                    landing_xy[1],
+                )
+            else:
+                self.landing_target_description = "ArUco ID %d" % self.landing_aruco_id
+        else:
+            # Normal mission completion. Give the designated landing ArUco
+            # a short opportunity to appear in the world marker list.
+            landing_xy = self.get_landing_marker_from_world(wait_timeout=5.0)
+
+            if landing_xy is None:
+                landing_xy = (self.fallback_landing_x,self.fallback_landing_y,)
+
+                self.landing_target_description = ("fallback XY [%.2f, %.2f]" % (landing_xy[0], landing_xy[1]))
+
+                rospy.logwarn("Landing ArUco ID %d was not found. ""Using fallback landing XY [%.2f, %.2f].",self.landing_aruco_id,landing_xy[0],landing_xy[1],)
+            else:
+                self.landing_target_description = ("ArUco ID %d" % self.landing_aruco_id)
+
+        self.landing_marker_map_position.x = landing_xy[0]
+        self.landing_marker_map_position.y = landing_xy[1]
+        self.returning_to_land = True
+
+        self.chatter_publisher.publish(
+            String(data="Heading to home position")
+        )
+
+        landing_approach_wp = [
+            landing_xy[0],
+            landing_xy[1],
+            self.surveyAltitude,
+            0.0,
+        ]
+
+        if not self.check_waypoint(landing_approach_wp):
+            rospy.logerr("Landing approach waypoint is outside safe boundaries.")
+            rospy.signal_shutdown("Unsafe landing approach")
+            return
+
+        rospy.loginfo(
+            "Returning with Breadcrumb to %s at XY [%.2f, %.2f].",
+            self.landing_target_description,
+            landing_xy[0],
+            landing_xy[1],
+        )
+
+        path = self.request_breadcrumb_path(
+            self.current_location,
+            landing_approach_wp,
+            "return-to-land",
+        )
+        if path is None:
+            rospy.signal_shutdown("No landing Breadcrumb path")
+            return
+
+        self.breadcrumbWPS = path
+        self.breadcrumbWPSnextIndex = 0
+        self.breadcrumbMode = True
+        self.landing_stage = "RETURN_BREADCRUMB"
+        if not self.send_next_landing_breadcrumb_wp():
+            rospy.signal_shutdown("Landing Breadcrumb waypoint rejected")
+
+    def send_next_landing_breadcrumb_wp(self):
+        if self.breadcrumbWPSnextIndex >= len(self.breadcrumbWPS):
+            return True
+
+        wp = self.breadcrumbWPS[self.breadcrumbWPSnextIndex]
+        if not self.send_wp(wp):
+            return False
+
+        self.breadcrumbWPSnextIndex += 1
+        return True
+
+    def handle_return_to_land(self, state):
+        if state in (GoalStatus.ABORTED, GoalStatus.REJECTED):
+            rospy.logerr("Return-to-land SPAR goal failed.")
+            rospy.signal_shutdown("Return-to-land failed")
+            return
+
+        if state != GoalStatus.SUCCEEDED:
+            return
+
+        if self.landing_stage == "RETURN_BREADCRUMB":
+            if self.breadcrumbWPSnextIndex < len(self.breadcrumbWPS):
+                if not self.send_next_landing_breadcrumb_wp():
+                    rospy.signal_shutdown("Landing Breadcrumb waypoint rejected")
+                return
+
+            self.breadcrumbMode = False
+            self.landing_in_progress = True
+
+            descent_wp = [
+                self.landing_marker_map_position.x,
+                self.landing_marker_map_position.y,
+                self.landing_final_altitude,
+                0.0,
+            ]
+
+            if not self.check_waypoint(descent_wp):
+                rospy.logerr("Final landing waypoint is outside safe boundaries.")
+                rospy.signal_shutdown("Unsafe landing waypoint")
+                return
+
+            rospy.loginfo(
+                "Breadcrumb return complete at %s. Descending to %.2f m.",
+                self.landing_target_description,
+                self.landing_final_altitude,
+            )
+            self.chatter_publisher.publish(
+                String(data="Beginning landing sequence")
+            )
+            self.landing_stage = "DESCEND"
+            self.send_wp(descent_wp)
+            return
+
+        if self.landing_stage == "DESCEND":
+            self.landing_stage = "HOVER"
+
+            rospy.loginfo(
+                "At %.2f m above %s. Hovering for %.1f seconds...",
+                self.landing_final_altitude,
+                self.landing_target_description,
+                self.landing_hover_time,
+            )
+
+            rospy.sleep(rospy.Duration(self.landing_hover_time))
+            rospy.loginfo("Hover complete. Sending LAND command.")
+
+            if self.send_land():
+                self.mission_complete = True
+                self.landing_in_progress = False
+                self.returning_to_land = False
+                self.landing_stage = "LANDED"
+                if hasattr(self, "timer"):
+                    self.timer.shutdown()
+                rospy.loginfo(
+                    "Mission complete. Landed at %s.",
+                    self.landing_target_description,
+                )
+                rospy.signal_shutdown("Mission complete")
+            else:
+                rospy.logerr("SPAR landing failed.")
+                rospy.signal_shutdown("Landing failed")
+
+    # -----------------------------------------------------------------------
+    # SPAR motion commands
+    # -----------------------------------------------------------------------
+    def send_takeoff(self):
+        goal = FlightMotionGoal()
+        goal.motion = FlightMotionGoal.MOTION_TAKEOFF
+        goal.position.z = self.surveyAltitude
+        goal.velocity_vertical = rospy.get_param("~takeoff_speed", 0.8)
+        goal.wait_for_convergence = True
+        goal.position_radius = self.accuracy_pos
+        goal.yaw_range = self.accuracy_yaw
+
+        rospy.loginfo("Sending TAKEOFF command...")
+        self.spar_client.send_goal(goal)
+        self.spar_client.wait_for_result()
+
+        if self.spar_client.get_state() == GoalStatus.SUCCEEDED:
+            #rospy.loginfo("Takeoff complete!")
+            return True
+
+        rospy.logerr("Takeoff failed!")
+        return False
+
+    # Send the final SPAR LAND action and wait until SPAR reports completion.
+    def send_land(self):
+        goal = FlightMotionGoal()
+        goal.motion = FlightMotionGoal.MOTION_LAND
+        goal.velocity_vertical = self.land_speed
+
+        #rospy.loginfo("Landing...")
+        self.spar_client.send_goal(goal)
+        self.spar_client.wait_for_result()
+
+        if self.spar_client.get_state() == GoalStatus.SUCCEEDED:
+            rospy.loginfo("Landing complete!")
+            return True
+
+        rospy.logerr(
+            "Landing failed! SPAR goal state = %d",
+            self.spar_client.get_state(),
+        )
+        return False
+
+    # This function is for convenience to simply send out a new waypoint.
+    def send_wp(self, wp):
+        if not self.check_waypoint(wp):
+            rospy.logwarn("Invalid waypoint, skipped...")
+            return False
+
+        goal = FlightMotionGoal()
+        goal.motion = FlightMotionGoal.MOTION_GOTO
+        goal.position.x = wp[0]
+        goal.position.y = wp[1]
+        goal.position.z = wp[2]
+        goal.yaw = wp[3]
+        goal.velocity_vertical = self.vel_linear
+        goal.velocity_horizontal = self.vel_linear
+        goal.yawrate = self.vel_yaw
+        goal.wait_for_convergence = True
+        goal.position_radius = self.accuracy_pos
+        goal.yaw_range = self.accuracy_yaw
+
+        self.active_goal_wp = list(wp)
+        self.spar_client.send_goal(goal)
+        return True
+
+    # -----------------------------------------------------------------------
+    # Main mission state machine
+    # -----------------------------------------------------------------------
+    def check_waypoint_status(self, te):
+        if self.mission_complete:
+            return
+
+        state = self.spar_client.get_state()
+
+        # Complete any target observation windows that have expired. Acquisition
+        # is time-based, so intermittent YOLO misses do not reset a valid fly-by.
+        for target_type in ("fire", "smoke"):
+            self._finalize_image_acquisition_if_ready(target_type)
+
+        # ========================================================
+        # LOW-BATTERY RETURN PRIORITY
+        # ========================================================
+        if self.low_battery_return_pending:
+            # Wait until a deliberately cancelled survey/image goal has finished
+            # transitioning before replacing it with the return-to-land goal.
+            if state in (GoalStatus.PENDING, GoalStatus.ACTIVE):
+                return
+
+            self.low_battery_return_pending = False
+            self.start_return_to_land(low_battery=True)
+            return
+
+        # ========================================================
+        # RETURN TO LAND
+        # ========================================================
+        if self.returning_to_land or self.landing_in_progress:
+            self.handle_return_to_land(state)
+            return
+
+        # ========================================================
+        # IMAGE DIVERSION
+        # ========================================================
+        if self.performing_image_diversion:
+            self.handle_image_diversion(state)
+            return
+
+        if self.image_diversion_request_pending:
+            self.start_next_image_diversion()
+            return
+
+        # Once at least one complete grid pass has been flown, there is no need
+        # to finish another pass after all mission objectives are already met.
+        # If both payloads are deployed and the designated home ArUco has been
+        # stored, immediately begin the normal return/landing sequence.
+        if (
+            self.grid_search_pass > 1
+            and self.payload_deployed["fire"]
+            and self.payload_deployed["smoke"]
+            and self.landing_marker_found
+        ):
+            rospy.loginfo(
+                "Both payloads deployed and landing ArUco ID %d found after at "
+                "least one complete grid pass. Returning to land.",
+                self.landing_aruco_id,
+            )
+            self.start_return_to_land(low_battery=False)
+            return
+
+        # PREEMPTED is only expected when this script deliberately cancelled a
+        # goal for low battery or an image diversion. Those cases are handled
+        # above before reaching this normal-survey error check.
+        if state in (
+            GoalStatus.PREEMPTED,
+            GoalStatus.ABORTED,
+            GoalStatus.REJECTED,
+        ):
+            rospy.loginfo("Mission cancelled!")
+            rospy.signal_shutdown("cancelled")
+            return
+
+        if state != GoalStatus.SUCCEEDED:
+            return
+
+        # Allow the previous actionlib goal transition to settle without adding
+        # a full one-second stop at every Breadcrumb point.
+        rospy.sleep(rospy.Duration(0.1))
+
+        # Once one complete grid pass has already been finished, there is no
+        # reason to complete another full pass after both payloads are deployed
+        # and the home ArUco is known. Finish the current motion, then return home.
+        if (
+            self.grid_search_pass > 1
+            and self.payload_deployed["fire"]
+            and self.payload_deployed["smoke"]
+            and self.landing_marker_found
+        ):
+            rospy.loginfo(
+                "Both payloads are deployed and landing ArUco ID %d is known after "
+                "a completed grid pass. Ending the repeat search and returning home.",
+                self.landing_aruco_id,
+            )
+            self.start_return_to_land(low_battery=False)
+            return
+
+        # ========================================================
+        # NORMAL GRID SEARCH
+        # ========================================================
+        survey_progressed = False
+
+        if self.nextWaypointIndex < len(self.waypoints):
+            if not self.breadcrumbMode:
+                rospy.loginfo("Reached main waypoint %i!", self.nextWaypointIndex)
+
+                req = RequestPathRequest()
+                req.start.x = self.waypoints[self.nextWaypointIndex - 1][0]
+                req.start.y = self.waypoints[self.nextWaypointIndex - 1][1]
+                req.start.z = self.waypoints[self.nextWaypointIndex - 1][2]
+                req.end.x = self.waypoints[self.nextWaypointIndex][0]
+                req.end.y = self.waypoints[self.nextWaypointIndex][1]
+                req.end.z = self.waypoints[self.nextWaypointIndex][2]
+
+                try:
+                    res = self.srvc_bc(req)
+                except rospy.ServiceException as error:
+                    rospy.logerr("Breadcrumb service failed: %s", str(error))
+                    rospy.signal_shutdown("Breadcrumb service failed")
+                    return
+
+                if len(res.path_sparse.poses) == 0:
+                    rospy.logerr("Breadcrumb solution not found")
+                    rospy.signal_shutdown("No valid Breadcrumb path")
+                    return
+
+                rospy.loginfo(
+                    "Breadcrumb Redirected Path: "
+                    "[%0.2f;%0.2f;%0.2f] => [%0.2f;%0.2f;%0.2f]",
+                    req.start.x,
+                    req.start.y,
+                    req.start.z,
+                    req.end.x,
+                    req.end.y,
+                    req.end.z,
+                )
+
+                poses = res.path_sparse.poses
+
+                # RViz shows the complete sparse Breadcrumb solution, including
+                # the start pose. SPAR execution below still skips that first pose.
+                breadcrumb_visual_wps = []
+                for pose in poses:
+                    breadcrumb_visual_wps.append(
+                        [
+                            pose.position.x,
+                            pose.position.y,
+                            pose.position.z,
+                            0.0,
+                        ]
+                    )
+
+                breadcrumb_wps = []
+                start_index = 1 if len(poses) > 1 else 0
+
+                for pose in poses[start_index:]:
+                    breadcrumb_wp = [
+                        pose.position.x,
+                        pose.position.y,
+                        pose.position.z,
+                        0.0,
+                    ]
+
+                    #rospy.loginfo(
+                    #    "[%0.2f;%0.2f;%0.2f]",
+                    #    breadcrumb_wp[0],
+                    #    breadcrumb_wp[1],
+                    #    breadcrumb_wp[2]
+                    #)
+
+                    if not self.check_waypoint(breadcrumb_wp):
+                        rospy.logerr(
+                            "Breadcrumb generated unsafe waypoint: "
+                            "[%0.2f;%0.2f;%0.2f]",
+                            breadcrumb_wp[0],
+                            breadcrumb_wp[1],
+                            breadcrumb_wp[2],
+                        )
+                        rospy.signal_shutdown("Unsafe Breadcrumb path")
+                        return
+
+                    breadcrumb_wps.append(breadcrumb_wp)
+
+                if not breadcrumb_wps:
+                    breadcrumb_wps.append(list(self.waypoints[self.nextWaypointIndex]))
+
+                self.breadcrumbWPS = breadcrumb_wps
+
+                # Publish the full Breadcrumb solution to RViz, including the
+                # start pose that is intentionally omitted from SPAR commands.
+                self.display_path(
+                    breadcrumb_visual_wps,
+                    self.breadcrumb_path_topic,
+                )
+
+                self.breadcrumbMode = True
+                self.breadcrumbWPSnextIndex = 0
+                if not self.send_wp(self.breadcrumbWPS[self.breadcrumbWPSnextIndex]):
+                    rospy.signal_shutdown("Survey Breadcrumb waypoint rejected")
+                    return
+                self.breadcrumbWPSnextIndex += 1
+                survey_progressed = True
+
+            else:
+                if self.breadcrumbWPSnextIndex < len(self.breadcrumbWPS):
+                    if not self.send_wp(self.breadcrumbWPS[self.breadcrumbWPSnextIndex]):
+                        rospy.signal_shutdown("Survey Breadcrumb waypoint rejected")
+                        return
+                    self.breadcrumbWPSnextIndex += 1
+                    survey_progressed = True
+                else:
+                    self.breadcrumbMode = False
+                    self.nextWaypointIndex += 1
+                    survey_progressed = True
+
+        else:
+            # If the other image target was detected while a diversion was in
+            # progress, complete that pending payload task before deciding whether
+            # another grid pass is required.
+            if self.pending_image_targets:
+                self.image_diversion_request_pending = True
+                self.start_next_image_diversion()
+                return
+
+            missing_targets = [
+                target_type
+                for target_type in ("fire", "smoke")
+                if not self.payload_deployed[target_type]
+            ]
+
+            if missing_targets:
+                rospy.logwarn(
+                    "Grid search pass %d complete without payload deployment for: %s. "
+                    "Starting the grid search again.",
+                    self.grid_search_pass,
+                    ", ".join(missing_targets),
+                )
+                self.chatter_publisher.publish(
+                    String(
+                        data="Repeating grid search for {}".format(
+                            " and ".join(missing_targets)
+                        )
+                    )
+                )
+
+                # Do not count an earlier rejected/aborted estimate as having found
+                # the target. Start a fresh median window for each missing type.
+                for target_type in missing_targets:
+                    self.image_targets[target_type] = None
+                    self._reset_image_samples(target_type)
+
+                self.breadcrumbMode = False
+                self.breadcrumbWPS = []
+                self.breadcrumbWPSnextIndex = 0
+                self.nextWaypointIndex = 0
+                self.grid_search_pass += 1
+                return
+
+            if not self.landing_marker_found:
+                rospy.logwarn(
+                    "Grid search pass %d complete and both payloads are deployed, "
+                    "but landing ArUco ID %d has not been found. Repeating the grid "
+                    "search to continue looking for home.",
+                    self.grid_search_pass,
+                    self.landing_aruco_id,
+                )
+                self.chatter_publisher.publish(
+                    String(data="Repeating grid search to find home marker")
+                )
+                self.breadcrumbMode = False
+                self.breadcrumbWPS = []
+                self.breadcrumbWPSnextIndex = 0
+                self.nextWaypointIndex = 0
+                self.grid_search_pass += 1
+                return
+
+            self.start_return_to_land(low_battery=False)
+            return
+
+        # A second target that was detected during a diversion is deliberately
+        # held until the UAV has returned to the interruption point and normal
+        # survey routing has progressed again.
+        if survey_progressed and self.defer_pending_image_until_survey_progress:
+            self.defer_pending_image_until_survey_progress = False
+            if self.pending_image_targets:
+                self.image_diversion_request_pending = True
+
+    # -----------------------------------------------------------------------
+    # RViz path visualisation
+    # -----------------------------------------------------------------------
+    # Publish a nav_msgs/Path using a persistent, latched publisher. Keeping
+    # the publisher alive is important for one-shot paths such as image
+    # diversions and the final Breadcrumb route back to the landing location.
+    def display_path(self, wps, name):
+        if name not in self.path_publishers:
+            self.path_publishers[name] = rospy.Publisher(
+                name, Path, queue_size=1, latch=True
+            )
+
+        pub_path = self.path_publishers[name]
+
+        msg = Path()
+        msg.header.frame_id = self.global_frame
+        msg.header.stamp = rospy.Time.now()
+
+        for wp in wps:
+            pose = PoseStamped()
+            pose.header.frame_id = msg.header.frame_id
+            pose.header.stamp = msg.header.stamp
+            pose.pose.position.x = wp[0]
+            pose.pose.position.y = wp[1]
+            pose.pose.position.z = wp[2]
+            pose.pose.orientation.w = 1.0
+            msg.poses.append(pose)
+
+        pub_path.publish(msg)
+
+
+def main(args):
+    rospy.init_node("guidance")
+    surveyAltitude = rospy.get_param("~surveyAlt", 1.5)
+
+    # List of waypoints [X, Y, Z, Yaw].
+
+    wps = [[ -1.0,  -1.00, surveyAltitude, 0.0],
+        [  3.6,  -3.25, surveyAltitude, 0.0],
+        [ -4.0,  -3.25, surveyAltitude, 0.0],
+        [ -4.0,  -2.60, surveyAltitude, 0.0],
+        [  3.6,  -2.60, surveyAltitude, 0.0],
+        [  3.6,  -2.00, surveyAltitude, 0.0],
+        [ -4.0,  -2.00, surveyAltitude, 0.0],
+        [ -4.0,  -1.38, surveyAltitude, 0.0],
+        [  3.6,  -1.38, surveyAltitude, 0.0],
+        [  3.6,  -0.75, surveyAltitude, 0.0],
+        [ -4.0,  -0.75, surveyAltitude, 0.0],
+        [ -4.0,  -0.15, surveyAltitude, 0.0],
+        [  3.6,  -0.15, surveyAltitude, 0.0],
+        [  3.6,   0.50, surveyAltitude, 0.0],
+        [ -4.0,   0.50, surveyAltitude, 0.0],
+        [ -4.0,   1.15, surveyAltitude, 0.0],
+        [  3.6,   1.15, surveyAltitude, 0.0],
+        [  3.6,   1.75, surveyAltitude, 0.0],
+        [ -4.0,   1.75, surveyAltitude, 0.0]]
+
+    Guidance(wps)
+    rospy.spin()
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv)
+    except rospy.ROSInterruptException:
+        pass
+
+    print("Node Closed")
