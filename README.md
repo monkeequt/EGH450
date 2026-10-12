@@ -1,4 +1,4 @@
-# EGH450 — UAS_FIRE (Group 6)
+# EGH450 - UAS_FIRE (Group 6)
 
 A team of Group 6 engineers designing an autonomous bushfire detection and extinguishing drone for QUT's EGB349 and EGH450 in 2026. The project covers the planning, design, build and flight testing of UAS_FIRE.
 
